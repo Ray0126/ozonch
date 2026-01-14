@@ -1484,21 +1484,29 @@ with tab4:
 
     st.markdown("### Добавить расход")
 
-    c1, c2, c3, _sp = st.columns([1.2, 3.6, 1.8, 1.4])  # последний _sp пустой
+    c1, c2, c3, c4 = st.columns([1.2, 3.0, 1.2, 1.3])
+
     with c1:
-        new_date = st.date_input("Дата", value=date.today(), key="opex_new_date")
+        st.markdown("**Дата**")
+        new_date = st.date_input(
+            "Дата",
+            value=date.today(),
+            key="opex_new_date",
+            label_visibility="collapsed",
+        )
 
     with c2:
+        st.markdown("**Тип**")
         types_saved = load_opex_types()
         options = (types_saved or []) + ["➕ Добавить новый тип"]
 
-        # ВАЖНО: index=None => ничего не выбрано по умолчанию
         sel = st.selectbox(
             "Тип",
             options=options,
-            index=None,
+            index=None,  # важно: ничего не выбрано по умолчанию
             placeholder="Выберите тип расхода…",
             key="opex_type_select",
+            label_visibility="collapsed",
         )
 
         if sel == "➕ Добавить новый тип":
@@ -1507,13 +1515,25 @@ with tab4:
                 value="",
                 placeholder="Например: Зарплата, Аренда…",
                 key="opex_new_type_manual",
+                label_visibility="collapsed",
             ).strip()
         else:
             new_type = (sel or "").strip()
 
     with c3:
-        new_amount = st.number_input("Сумма, ₽", min_value=0.0, value=0.0, step=100.0, key="opex_new_amount")
-        add_exp = st.button("Добавить расход", key="opex_add_btn", use_container_width=True)
+        st.markdown("**Сумма, ₽**")
+        new_amount = st.number_input(
+            "Сумма, ₽",
+            min_value=0.0,
+            value=0.0,
+            step=100.0,
+            key="opex_new_amount",
+            label_visibility="collapsed",
+        )
+
+        with c4:
+            st.markdown("&nbsp;")  # создаём “строку” под заголовок, чтобы кнопка стала на один уровень
+            add_exp = st.button("Добавить расход", key="opex_add_btn", use_container_width=True)
 
     if add_exp:
         t = (new_type or "").strip()
