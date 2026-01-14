@@ -1493,7 +1493,7 @@ with tab4:
         options = (types_saved or []) + ["➕ Добавить новый тип"]
 
         # ВАЖНО: index=None => ничего не выбрано по умолчанию
-         sel = st.selectbox(
+        sel = st.selectbox(
             "Тип",
             options=options,
             index=None,
