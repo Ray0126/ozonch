@@ -634,6 +634,23 @@ def normalize_cogs_upload(df: pd.DataFrame) -> pd.DataFrame:
 
 def load_cogs() -> pd.DataFrame:
     ensure_data_dir()
+    # 1) Supabase приоритетнее
+    if USE_SUPABASE:
+        try:
+            df = _sb_fetch("cogs", select="sku,article,cogs", limit=100000)
+            if not df.empty:
+                df.columns = [str(c).strip() for c in df.columns]
+                if "article" not in df.columns:
+                    df["article"] = ""
+                df["sku"] = pd.to_numeric(df["sku"], errors="coerce").astype("Int64")
+                df["cogs"] = pd.to_numeric(df["cogs"], errors="coerce").fillna(0.0)
+                df = df.dropna(subset=["sku"]).copy()
+                df["sku"] = df["sku"].astype(int)
+                df["article"] = df["article"].fillna("").astype(str)
+                df = df[["article","sku","cogs"]].drop_duplicates(subset=["sku"], keep="last").sort_values("sku")
+                return df
+        except Exception:
+            pass
     if os.path.exists(COGS_PATH):
         try:
             df = pd.read_csv(COGS_PATH, encoding="utf-8-sig")
@@ -660,25 +677,13 @@ def load_cogs() -> pd.DataFrame:
     return pd.DataFrame(columns=["article", "sku", "cogs"])
 
 def save_cogs(df: pd.DataFrame):
-    if USE_SUPABASE:
-        try:
-            # приводим к списку dict
-            rows = df2[["sku", "article", "cogs"]].copy()
-            rows["sku"] = pd.to_numeric(rows["sku"], errors="coerce").fillna(0).astype(int)
-            rows["cogs"] = pd.to_numeric(rows["cogs"], errors="coerce").fillna(0.0)
-            rows["article"] = rows["article"].fillna("").astype(str)
-            payload = rows.to_dict(orient="records")
-            _sb_replace_all("cogs", payload, "sku=gt.0")
-        except Exception:
-            # не блокируем пользователя, просто сохраним локально
-            pass
-
     ensure_data_dir()
-    df2 = df.copy()
+    df2 = df.copy() if df is not None else pd.DataFrame(columns=["article","sku","cogs"])
     if "article" not in df2.columns:
         df2["article"] = ""
     if "cogs" not in df2.columns:
         df2["cogs"] = 0.0
+
     df2 = df2[["article", "sku", "cogs"]].copy()
     df2["sku"] = pd.to_numeric(df2["sku"], errors="coerce").astype("Int64")
     df2["cogs"] = pd.to_numeric(df2["cogs"], errors="coerce").fillna(0.0)
@@ -686,6 +691,14 @@ def save_cogs(df: pd.DataFrame):
     df2["sku"] = df2["sku"].astype(int)
     df2["article"] = df2["article"].astype(str).fillna("")
     df2 = df2.drop_duplicates(subset=["sku"], keep="last").sort_values("sku")
+
+    # 1) Supabase
+    if USE_SUPABASE:
+        rows = df2[["sku", "article", "cogs"]].copy()
+        payload = rows.to_dict(orient="records")
+        _sb_replace_all("cogs", payload, "sku=gt.0")
+
+    # 2) Локально (fallback)
     df2.to_csv(COGS_PATH, index=False, encoding="utf-8-sig")
 
 
@@ -727,27 +740,26 @@ def load_opex() -> pd.DataFrame:
     return _opex_empty()
 
 def save_opex(df: pd.DataFrame):
-    if USE_SUPABASE:
-        try:
-            rows = df2[["date","type","amount"]].copy()
-            rows["date"] = pd.to_datetime(rows["date"], errors="coerce").dt.strftime("%Y-%m-%d")
-            rows["type"] = rows["type"].fillna("").astype(str)
-            rows["amount"] = pd.to_numeric(rows["amount"], errors="coerce").fillna(0.0)
-            payload = rows.to_dict(orient="records")
-            _sb_replace_all("opex", payload, "id=gt.0")
-        except Exception:
-            pass
-
     ensure_data_dir()
+
     df2 = df.copy() if df is not None else _opex_empty()
     if df2.empty:
         df2 = _opex_empty()
+
     df2 = df2[["date","type","amount"]].copy()
     df2["date"] = pd.to_datetime(df2["date"], errors="coerce").dt.date
     df2["type"] = df2["type"].fillna("").astype(str)
     df2["amount"] = pd.to_numeric(df2["amount"], errors="coerce").fillna(0.0)
     df2 = df2.dropna(subset=["date"]).sort_values(["date","type"]).reset_index(drop=True)
-    # сохраняем как ISO yyyy-mm-dd
+
+    # 1) Supabase
+    if USE_SUPABASE:
+        rows = df2.copy()
+        rows["date"] = pd.to_datetime(rows["date"], errors="coerce").dt.strftime("%Y-%m-%d")
+        payload = rows.to_dict(orient="records")
+        _sb_replace_all("opex", payload, "id=gt.0")
+
+    # 2) Локально
     out = df2.copy()
     out["date"] = out["date"].apply(lambda d: d.strftime("%Y-%m-%d") if hasattr(d, "strftime") else str(d))
     out.to_csv(OPEX_PATH, index=False, encoding="utf-8-sig")
@@ -769,17 +781,26 @@ uploaded = st.sidebar.file_uploader(
     accept_multiple_files=False
 )
 
+# --- ДИАГНОСТИКА SUPABASE (временно) ---
+if USE_SUPABASE:
+    st.sidebar.write("SUPABASE ON ✅")
+else:
+    st.sidebar.write("SUPABASE OFF ❌ (нет SUPABASE_URL или SUPABASE_SERVICE_ROLE_KEY)")
+
 cogs_df = load_cogs()
 df_opex = load_opex()
+
 if uploaded is not None:
     try:
         if uploaded.name.lower().endswith(".csv"):
             tmp = pd.read_csv(uploaded, encoding="utf-8-sig")
         else:
             tmp = pd.read_excel(uploaded)
+
         cogs_df = normalize_cogs_upload(tmp)
         save_cogs(cogs_df)
-        st.sidebar.success("Себестоимость загружена и сохранена в data/cogs.csv")
+
+        st.sidebar.success("Себестоимость загружена и сохранена")
     except Exception as e:
         st.sidebar.error(f"Не смог прочитать файл: {e}")
 
@@ -1356,7 +1377,7 @@ with tab1:
             if c not in show.columns:
                 show[c] = 0.0
         show = show[cols].copy()
-
+        show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
         # Сортировка должна работать корректно => оставляем числовые типы
         # Числа приводим, но НЕ форматируем в строки
         int_cols = ["Заказы, шт","Возвраты, шт","Выкуп, шт"]
@@ -1848,7 +1869,7 @@ with tab2:
 
     pivot_pretty = pivot.apply(format_row, axis=1)
     st.markdown("### Помесячная таблица")
-    st.dataframe(pivot_pretty, use_container_width=True, hide_index=True)
+    pivot_pretty, use_container_width=True, hide_index=True)
 
     def export_monthly_xlsx(df_rows: pd.DataFrame, df_pivot_pretty: pd.DataFrame) -> bytes:
         bio = io.BytesIO()
@@ -2118,7 +2139,7 @@ with tab3:
         view["Прибыль, ₽"] = pd.to_numeric(view["Прибыль, ₽"], errors="coerce").fillna(0.0)
 
 
-    st.dataframe(
+    
         view[[
             "Артикул", "SKU", "Товар",
             "Выкуплено, шт", "Группа по выкупу",
