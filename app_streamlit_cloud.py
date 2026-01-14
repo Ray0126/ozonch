@@ -10,6 +10,53 @@ from dotenv import load_dotenv
 import sys
 from pathlib import Path
 
+# ================== AUTH ==================
+APP_PASSWORD = os.getenv("APP_PASSWORD")
+
+if "auth_ok" not in st.session_state:
+    st.session_state.auth_ok = False
+
+if not st.session_state.auth_ok:
+    st.markdown(
+        """
+        <style>
+        .auth-box {
+            max-width: 420px;
+            margin: 120px auto;
+            padding: 30px;
+            border-radius: 12px;
+            background: #1f1f24;
+            box-shadow: 0 0 30px rgba(0,0,0,0.4);
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    with st.container():
+        st.markdown('<div class="auth-box">', unsafe_allow_html=True)
+        st.markdown("## 🔐 Вход в приложение")
+
+        with st.form("login_form"):
+            pwd = st.text_input(
+                "Пароль",
+                type="password",
+                placeholder="Введите пароль",
+            )
+            submitted = st.form_submit_button("Войти")
+
+        if submitted:
+            if pwd == APP_PASSWORD:
+                st.session_state.auth_ok = True
+                st.rerun()
+            else:
+                st.error("Неверный пароль")
+
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    st.stop()
+
+
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR / "src"))
 
