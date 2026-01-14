@@ -1654,7 +1654,7 @@ with tab2:
         end = date(year, month, last_day)
         return start, end
 
-    st.caption("⚠️ Ozon API по операциям позволяет запрашивать только период в пределах одного месяца. Поэтому месяцы считаем по одному.")
+    st.caption("Ozon API по операциям запрашивает данные по очереди периодами в один месяц.")
 
     y_l, m_l = last_closed_month(date.today())
     last_closed = date(y_l, m_l, 1)
@@ -2142,8 +2142,10 @@ with tab3:
     if "Прибыль, ₽" in view.columns:
         view["Прибыль, ₽"] = pd.to_numeric(view["Прибыль, ₽"], errors="coerce").fillna(0.0)
 
+    # перед отображением (чтобы сортировка была корректной)
+    view["SKU"] = pd.to_numeric(view["SKU"], errors="coerce").fillna(0).astype(int)
 
-    st.dataframe(  
+    st.dataframe(
         view[[
             "Артикул", "SKU", "Товар",
             "Выкуплено, шт", "Группа по выкупу",
@@ -2153,6 +2155,7 @@ with tab3:
         use_container_width=True,
         hide_index=True,
         column_config={
+            "SKU": st.column_config.NumberColumn(format="%.0f"),  # 👈 ключевое: без разделителей
             "Выкуплено, шт": st.column_config.NumberColumn(format="%.0f"),
             "Оборот, ₽": st.column_config.NumberColumn(format="%.0f"),
             "Прибыль, ₽": st.column_config.NumberColumn(format="%.0f"),
