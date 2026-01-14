@@ -1467,26 +1467,30 @@ with tab4:
 
     st.markdown("### Добавить расход")
 
-    c1, c2, c3 = st.columns([1.2, 2.8, 1.6])
+    c1, c2, c3, _sp = st.columns([1.2, 3.6, 1.8, 1.4])  # последний _sp пустой
     with c1:
         new_date = st.date_input("Дата", value=date.today(), key="opex_new_date")
 
     with c2:
-        # Один виджет: ввод + подсказки (шаблоны) + возможность вводить новый тип
-        try:
-            from streamlit_tags import st_tags
-            _tags = st_tags(
-                label="Тип",
-                text="Начни вводить и нажми Enter, либо выбери из списка",
-                value=[],
-                suggestions=types_saved,
-                maxtags=1,
-                key="opex_type_tags",
-            )
-            new_type = (_tags[0] if _tags else "").strip()
-        except Exception:
-            # fallback без стороннего компонента
-            new_type = st.text_input("Тип", value="", placeholder="Например: Зарплата, Аренда…", key="opex_new_type")
+    types_saved = load_opex_types()
+    options = (types_saved or []) + ["➕ Добавить новый тип"]
+
+    sel = st.selectbox(
+        "Тип",
+        options=options,
+        index=0 if types_saved else len(options) - 1,
+        key="opex_type_select",
+    )
+
+    if sel == "➕ Добавить новый тип":
+        new_type = st.text_input(
+            "Новый тип",
+            value="",
+            placeholder="Например: Зарплата, Аренда…",
+            key="opex_new_type_manual",
+        ).strip()
+    else:
+        new_type = (sel or "").strip()
 
     with c3:
         new_amount = st.number_input("Сумма, ₽", min_value=0.0, value=0.0, step=100.0, key="opex_new_amount")
@@ -1499,7 +1503,7 @@ with tab4:
         elif not t:
             st.warning("Укажи тип расхода.")
         else:
-            # авто-добавление нового типа в шаблоны
+            types_saved = load_opex_types()
             if t not in types_saved:
                 types_saved.append(t)
                 save_opex_types(types_saved)
