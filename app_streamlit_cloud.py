@@ -1472,15 +1472,15 @@ with tab4:
         new_date = st.date_input("Дата", value=date.today(), key="opex_new_date")
 
     with c2:
-    types_saved = load_opex_types()
-    options = (types_saved or []) + ["➕ Добавить новый тип"]
+        types_saved = load_opex_types()
+        options = (types_saved or []) + ["➕ Добавить новый тип"]
 
-    sel = st.selectbox(
-        "Тип",
-        options=options,
-        index=0 if types_saved else len(options) - 1,
-        key="opex_type_select",
-    )
+        sel = st.selectbox(
+            "Тип",
+            options=options,
+            index=0 if types_saved else len(options) - 1,
+            key="opex_type_select",
+        )
 
     if sel == "➕ Добавить новый тип":
         new_type = st.text_input(
