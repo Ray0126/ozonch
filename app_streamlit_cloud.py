@@ -619,6 +619,11 @@ def normalize_cogs_upload(df: pd.DataFrame) -> pd.DataFrame:
         "cogs": df2[cogs_col],
     })
 
+    out["sku"] = (
+    out["sku"]
+    .astype(str)
+    .str.replace(r"[^\d]", "", regex=True)   # убираем запятые/пробелы/мусор
+    )
     out["sku"] = pd.to_numeric(out["sku"], errors="coerce").astype("Int64")
     out["cogs"] = pd.to_numeric(out["cogs"], errors="coerce").fillna(0.0)
     out = out.dropna(subset=["sku"]).copy()
@@ -638,6 +643,11 @@ def load_cogs() -> pd.DataFrame:
             else:
                 if "article" not in df.columns:
                     df["article"] = ""
+                df["sku"] = (
+                    df["sku"]
+                    .astype(str)
+                    .str.replace(r"[^\d]", "", regex=True)
+                )
                 df["sku"] = pd.to_numeric(df["sku"], errors="coerce").astype("Int64")
                 df["cogs"] = pd.to_numeric(df["cogs"], errors="coerce").fillna(0.0)
                 df = df.dropna(subset=["sku"]).copy()
