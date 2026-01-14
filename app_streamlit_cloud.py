@@ -1869,7 +1869,11 @@ with tab2:
 
     pivot_pretty = pivot.apply(format_row, axis=1)
     st.markdown("### Помесячная таблица")
-    pivot_pretty, use_container_width=True, hide_index=True)
+    st.dataframe(
+    pivot_pretty,
+    use_container_width=True,
+    hide_index=True
+    )
 
     def export_monthly_xlsx(df_rows: pd.DataFrame, df_pivot_pretty: pd.DataFrame) -> bytes:
         bio = io.BytesIO()
