@@ -1441,7 +1441,7 @@ with tab4:
             from streamlit_tags import st_tags
             _tags = st_tags(
                 label="Тип",
-                text="Начни вводить и выбери из списка или добавь новый",
+                text="Начни вводить и нажми Enter, либо выбери из списка",
                 value=[],
                 suggestions=types_saved,
                 maxtags=1,
