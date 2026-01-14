@@ -1,0 +1,6 @@
+streamlit==1.37.1
+pandas==2.2.2
+requests==2.32.3
+python-dotenv==1.0.1
+openpyxl==3.1.5
+streamlit-tags==1.2.8
