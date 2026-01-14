@@ -526,6 +526,23 @@ div[data-testid="stDateInput"] small { display: none !important; }
 
 st.markdown("""
 <style>
+/* Делает текст/placeholder в input визуально по центру (за счёт padding/line-height) */
+div[data-testid="stTextInput"] input {
+  padding-top: 0.55rem !important;
+  padding-bottom: 0.55rem !important;
+  line-height: 1.2 !important;
+}
+
+/* Чуть выравниваем selectbox, чтобы он выглядел как остальные поля */
+div[data-testid="stSelectbox"] div[role="combobox"] {
+  padding-top: 0.45rem !important;
+  padding-bottom: 0.45rem !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
+<style>
 /* ===== OPEX: выравниваем инпуты в строке "Добавить расход" ===== */
 
 /* общий контейнер: выравниваем содержимое колонок по низу */
@@ -1475,22 +1492,24 @@ with tab4:
         types_saved = load_opex_types()
         options = (types_saved or []) + ["➕ Добавить новый тип"]
 
-        sel = st.selectbox(
+        # ВАЖНО: index=None => ничего не выбрано по умолчанию
+         sel = st.selectbox(
             "Тип",
             options=options,
-            index=0 if types_saved else len(options) - 1,
+            index=None,
+            placeholder="Выберите тип расхода…",
             key="opex_type_select",
         )
 
-    if sel == "➕ Добавить новый тип":
-        new_type = st.text_input(
-            "Новый тип",
-            value="",
-            placeholder="Например: Зарплата, Аренда…",
-            key="opex_new_type_manual",
-        ).strip()
-    else:
-        new_type = (sel or "").strip()
+        if sel == "➕ Добавить новый тип":
+            new_type = st.text_input(
+                "Новый тип",
+                value="",
+                placeholder="Например: Зарплата, Аренда…",
+                key="opex_new_type_manual",
+            ).strip()
+        else:
+            new_type = (sel or "").strip()
 
     with c3:
         new_amount = st.number_input("Сумма, ₽", min_value=0.0, value=0.0, step=100.0, key="opex_new_amount")
