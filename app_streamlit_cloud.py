@@ -524,6 +524,42 @@ div[data-testid="stDateInput"] small { display: none !important; }
     unsafe_allow_html=True,
 )
 
+st.markdown("""
+<style>
+/* ===== OPEX: выравниваем инпуты в строке "Добавить расход" ===== */
+
+/* общий контейнер: выравниваем содержимое колонок по низу */
+div[data-testid="stHorizontalBlock"]{
+  align-items: flex-end;
+}
+
+/* делаем одинаковую высоту полей ввода (date/text/number) */
+div[data-testid="stDateInput"] input,
+div[data-testid="stTextInput"] input,
+div[data-testid="stNumberInput"] input{
+  height: 44px !important;
+  line-height: 44px !important;
+  padding-top: 0 !important;
+  padding-bottom: 0 !important;
+}
+
+/* st_tags (baseweb tag input) — чтобы был той же высоты */
+div[data-baseweb="tag-input"]{
+  min-height: 44px !important;
+  align-items: center !important;
+}
+div[data-baseweb="tag-input"] > div{
+  min-height: 44px !important;
+  align-items: center !important;
+}
+
+/* кнопка добавления — в ту же высоту */
+button[kind="secondary"], button[kind="primary"]{
+  height: 44px !important;
+}
+</style>
+""", unsafe_allow_html=True)
+
 # ================== HELPERS ==================
 def money(x) -> str:
     try:
