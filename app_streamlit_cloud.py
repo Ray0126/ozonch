@@ -2143,7 +2143,7 @@ with tab3:
         view["Прибыль, ₽"] = pd.to_numeric(view["Прибыль, ₽"], errors="coerce").fillna(0.0)
 
 
-    
+    st.dataframe(  
         view[[
             "Артикул", "SKU", "Товар",
             "Выкуплено, шт", "Группа по выкупу",
