@@ -9,9 +9,12 @@ from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
 import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from src.ozon_client import OzonSellerClient, last_closed_month
+BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR / "src"))
+
+from ozon_client import OzonSellerClient, last_closed_month
+
 
 # ================== CONFIG ==================
 st.set_page_config(
