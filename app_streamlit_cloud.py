@@ -675,7 +675,7 @@ class OzonPerfClient:
 
     @staticmethod
     def _pick_num(df: pd.DataFrame, candidates: list[str]) -> float:
-        cols_l = {._norm_col(c): c for c in df.columns}
+        cols_l = {self._norm_col(c): c for c in df.columns}
         for name in candidates:
             key = ._norm_col(name)
             if key in cols_l:
