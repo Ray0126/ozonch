@@ -2016,6 +2016,9 @@ else:
 
     sold_view["sku"] = pd.to_numeric(sold_view["sku"], errors="coerce").fillna(0).astype(int)
     sold_view["ads_total"] = sold_view["sku"].map(spend_map).fillna(0.0)
+
+    nonzero_cnt = int((sold_view["ads_total"] > 0).sum())
+    
     st.write("ADS TOTAL SUM:", float(sold_view["ads_total"].sum()))
 
     with st.expander("DEBUG: реклама по SKU", expanded=False):
@@ -2034,94 +2037,87 @@ else:
     with st.expander("DEBUG: реклама по SKU", expanded=False):
         st.write("spend_map size:", len(spend_map))
         st.write("spend_map sample:", list(spend_map.items())[:10])
-        st.write("nonzero ads_total:", int((sold_view["ads_total"] > 0).sum()))
-        if nonzero_cnt == 0 and spend_map:
-            st.write("pid_to_sku sample:", list(pid_to_sku.items())[:10])
-            st.write("spend_by_sku sample:", list(spend_by_sku.items())[:10])
+        st.write("nonzero ads_total:", nonzero_cnt)
 
 
-        show = sold_view.copy()
-        show = show.rename(columns={
-            "article": "Артикул",
-            "sku": "SKU",
-            "name": "Название",
-            "qty_orders": "Заказы, шт",
-            "qty_returns": "Возвраты, шт",
-            "qty_buyout": "Выкуп, шт",
-            "accruals_net": "Выручка, ₽",
-            "commission": "Комиссия, ₽",
-            "logistics": "Услуги/логистика, ₽",
-            "sale_costs": "Расходы Ozon, ₽",
-            "ads_total": "Реклама, ₽",
-            "cogs_unit": "Себестоимость 1 шт, ₽",
-            "cogs_total": "Себестоимость всего, ₽",
-            "tax_total": "Налог, ₽",
-            "opex_total": "Опер. расходы, ₽",
-            "profit": "Прибыль, ₽",
-            "profit_per_unit": "Прибыль на 1 шт, ₽",
-            "margin_%": "Маржинальность, %",
-            "roi_%": "ROI, %",
-        })
+    show = sold_view.copy()
+    show = show.rename(columns={
+        "article": "Артикул",
+        "sku": "SKU",
+        "name": "Название",
+        "qty_orders": "Заказы, шт",
+        "qty_returns": "Возвраты, шт",
+        "qty_buyout": "Выкуп, шт",
+        "accruals_net": "Выручка, ₽",
+        "commission": "Комиссия, ₽",
+        "logistics": "Услуги/логистика, ₽",
+        "sale_costs": "Расходы Ozon, ₽",
+        "ads_total": "Реклама, ₽",
+        "cogs_unit": "Себестоимость 1 шт, ₽",
+        "cogs_total": "Себестоимость всего, ₽",
+        "tax_total": "Налог, ₽",
+        "opex_total": "Опер. расходы, ₽",
+        "profit": "Прибыль, ₽",
+        "profit_per_unit": "Прибыль на 1 шт, ₽",
+        "margin_%": "Маржинальность, %",
+        "roi_%": "ROI, %",
+    })
 
-        # порядок колонок
-        cols = [
-            "Артикул","SKU","Название",
-            "Заказы, шт","Возвраты, шт","Выкуп, шт",
-            "Выручка, ₽",
-            "Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽",
-            "Реклама, ₽",
-            "Себестоимость 1 шт, ₽","Себестоимость всего, ₽",
-            "Налог, ₽",
-            "Опер. расходы, ₽",
-            "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
-        ]
-        for c in cols:
-            if c not in show.columns:
-                show[c] = 0.0
-        show = show[cols].copy()
-        show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
-        # Сортировка должна работать корректно => оставляем числовые типы
-        # Числа приводим, но НЕ форматируем в строки
-        int_cols = ["Заказы, шт","Возвраты, шт","Выкуп, шт"]
-        for c in int_cols:
-            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0).astype(int)
+    # порядок колонок
+    cols = [
+        "Артикул","SKU","Название",
+        "Заказы, шт","Возвраты, шт","Выкуп, шт",
+        "Выручка, ₽",
+        "Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽",
+        "Реклама, ₽",
+        "Себестоимость 1 шт, ₽","Себестоимость всего, ₽",
+        "Налог, ₽",
+        "Опер. расходы, ₽",
+        "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
+    ]
+    for c in cols:
+        if c not in show.columns:
+            show[c] = 0.0
+    show = show[cols].copy()
+    show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
+    # Сортировка должна работать корректно => оставляем числовые типы
+    # Числа приводим, но НЕ форматируем в строки
+    int_cols = ["Заказы, шт","Возвраты, шт","Выкуп, шт"]
+    for c in int_cols:
+        show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0).astype(int)
 
-        money_cols = [
-            "Выручка, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
-            "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
-            "Прибыль, ₽","Прибыль на 1 шт, ₽",
-        ]
-        for c in money_cols:
-            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
+    money_cols = [
+        "Выручка, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
+        "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
+        "Прибыль, ₽","Прибыль на 1 шт, ₽",
+    ]
+    for c in money_cols:
+        show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
-        pct_cols = ["Маржинальность, %","ROI, %"]
-        for c in pct_cols:
-            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
+    pct_cols = ["Маржинальность, %","ROI, %"]
+    for c in pct_cols:
+        show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
-        st.dataframe(
-            show,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
-                "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
-                "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
-                **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols},
-                "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
-                "ROI, %": st.column_config.NumberColumn(format="%.1f"),
-            }
-        )
+    st.dataframe(
+        show,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
+            "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
+            "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
+            **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols},
+            "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
+            "ROI, %": st.column_config.NumberColumn(format="%.1f"),
+        }
+    )
 
-        st.download_button(
-            "Скачать XLSX (таблица проданных SKU)",
-            data=export_soldsku_xlsx(show),
-            file_name=f"ozon_soldsku_{d_from.strftime('%Y-%m-%d')}_{d_to.strftime('%Y-%m-%d')}.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-
-
-
-
+    st.download_button(
+        "Скачать XLSX (таблица проданных SKU)",
+        data=export_soldsku_xlsx(show),
+        file_name=f"ozon_soldsku_{d_from.strftime('%Y-%m-%d')}_{d_to.strftime('%Y-%m-%d')}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
 # ================== TAB 4 (OPEX) ==================
 with tab4:
