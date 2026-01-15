@@ -525,6 +525,166 @@ class OzonPerfClient:
             return base, note, dbg
 
 
+    # ----------------- products report (Оплата за заказ / клик) -----------------
+    def _poll_report_state(self, uuid: str, *, poll_sec: int = 2, max_wait_sec: int = 20 * 60) -> dict:
+        """Проверяем готовность отчёта по UUID."""
+        token = self.get_token()
+        url = self.base_url + f"/api/client/statistics/{uuid}"
+        start = time.time()
+        while True:
+            r = requests.get(url, headers={"Authorization": f"Bearer {token}", "Accept": "application/json"}, timeout=30)
+            if r.status_code == 404:
+                # отчёт ещё "не появился" — норм
+                if time.time() - start > max_wait_sec:
+                    raise TimeoutError("Слишком долго 404 — отчёт не появляется.")
+                time.sleep(poll_sec)
+                continue
+            if r.status_code < 200 or r.status_code >= 300:
+                raise RuntimeError(f"{r.status_code} /api/client/statistics/{{uuid}}: {r.text}")
+            data = r.json() if r.text else {}
+            state = str(data.get("state", "")).upper()
+            if state in ("OK", "DONE", "READY", "SUCCESS", "COMPLETED"):
+                return data
+            if state in ("ERROR", "FAILED"):
+                raise RuntimeError(f"Report failed: {data}")
+            if time.time() - start > max_wait_sec:
+                raise TimeoutError(f"Не дождались готовности. Последний state={state}")
+            time.sleep(poll_sec)
+
+    @staticmethod
+    def _extract_semicolon_csv_table(text: str, header_startswith: str = "SKU;") -> str:
+        """У отчётов Ozon иногда первая строка служебная. Берём таблицу с заголовка."""
+        t = (text or "").lstrip("\ufeff")
+        lines = t.splitlines()
+        start = 0
+        for i, ln in enumerate(lines):
+            if ln.strip().startswith(header_startswith):
+                start = i
+                break
+        return "\n".join(lines[start:]).strip()
+
+    def fetch_payperorder_products(self, date_from_str: str, date_to_str: str) -> pd.DataFrame:
+        """Отчёт 'Оплата за заказ' (внутри есть и оплата за клик) с разбивкой по SKU/Артикулу.
+        Возвращает DataFrame с колонками из CSV.
+        """
+        token = self.get_token()
+        h_any = {"Authorization": f"Bearer {token}", "Accept": "*/*"}
+
+        # 1) генерим отчёт
+        gen = requests.post(
+            self.base_url + "/api/client/statistic/products/generate",
+            headers={**h_any, "Content-Type": "application/json"},
+            json={"dateFrom": date_from_str, "dateTo": date_to_str},
+            timeout=60,
+        )
+        if gen.status_code < 200 or gen.status_code >= 300:
+            raise RuntimeError(f"{gen.status_code} /statistic/products/generate: {gen.text}")
+        g = gen.json() if gen.text else {}
+        uuid = g.get("UUID") or g.get("uuid")
+        if not uuid:
+            raise RuntimeError(f"UUID not found in generate response: {g}")
+
+        # 2) ждём готовность
+        self._poll_report_state(str(uuid))
+
+        # 3) скачиваем
+        rep = requests.get(
+            self.base_url + "/api/client/statistics/report",
+            headers=h_any,
+            params={"UUID": str(uuid)},
+            timeout=120,
+        )
+        if rep.status_code < 200 or rep.status_code >= 300:
+            raise RuntimeError(f"{rep.status_code} /statistics/report: {rep.text}")
+
+        ct = (rep.headers.get("content-type") or "").lower()
+        if "text/csv" not in ct:
+            # иногда может прийти json, но в твоём случае реально приходил csv
+            raise RuntimeError(f"Ожидал CSV, но пришло: {ct}")
+
+        table_text = self._extract_semicolon_csv_table(rep.text, header_startswith="SKU;")
+        if not table_text:
+            return pd.DataFrame()
+
+        df = pd.read_csv(io.StringIO(table_text), sep=";", dtype=str, keep_default_na=False)
+
+        # нормализуем числовые столбцы (в отчёте запятая — десятичный разделитель)
+        for col in df.columns:
+            s = df[col].astype(str)
+            if s.str.contains(r"\d", regex=True).any():
+                s2 = (
+                    s.str.replace("\u00a0", "", regex=False)
+                     .str.replace(" ", "", regex=False)
+                     .str.replace(",", ".", regex=False)
+                )
+                df[col] = pd.to_numeric(s2, errors="ignore")
+
+        return df
+
+    def spend_by_article_from_payperorder(self, date_from_str: str, date_to_str: str) -> dict:
+        """Возвращает:
+        - spend_map: dict(article -> spend_total)
+        - totals: {'spent_total','spent_click','spent_order'}
+        """
+        df = self.fetch_payperorder_products(date_from_str, date_to_str)
+        if df is None or df.empty:
+            return {}, {"spent_total": 0.0, "spent_click": 0.0, "spent_order": 0.0}
+
+        # названия колонок в отчёте
+        cols = {self._norm_col(c): c for c in df.columns}
+        def _col(*names):
+            for n in names:
+                k = self._norm_col(n)
+                if k in cols:
+                    return cols[k]
+            return None
+
+        art_col = _col("Артикул", "Article", "Offer id", "OfferID")
+        spend_click_col = _col('Расход ("Оплата за клики"), ₽', 'Расход (""Оплата за клики""), ₽', "Расход (Оплата за клики), ₽")
+        spend_order_col = _col('Расход ("Оплата за заказ"), ₽', 'Расход (""Оплата за заказ""), ₽', "Расход (Оплата за заказ), ₽")
+
+        if not art_col:
+            # fallback: иногда вместо "Артикул" может быть второй колонкой после SKU
+            if "SKU" in df.columns and len(df.columns) >= 2:
+                art_col = df.columns[1]
+
+        df2 = df.copy()
+        df2[art_col] = df2[art_col].astype(str).fillna("").str.strip()
+
+        for c in [spend_click_col, spend_order_col]:
+            if c and c in df2.columns:
+                df2[c] = pd.to_numeric(df2[c], errors="coerce").fillna(0.0)
+            else:
+                # если колонки нет — считаем как 0
+                pass
+
+        spend_click = df2[spend_click_col].sum() if spend_click_col in df2.columns else 0.0
+        spend_order = df2[spend_order_col].sum() if spend_order_col in df2.columns else 0.0
+
+        df2["__spent_total__"] = 0.0
+        if spend_click_col in df2.columns:
+            df2["__spent_total__"] += df2[spend_click_col]
+        if spend_order_col in df2.columns:
+            df2["__spent_total__"] += df2[spend_order_col]
+
+        spend_map = (
+            df2.groupby(art_col, dropna=False)["__spent_total__"]
+            .sum()
+            .to_dict()
+        )
+
+        # убираем пустые ключи
+        spend_map = {str(k).strip(): float(v) for k, v in spend_map.items() if str(k).strip()}
+
+        totals = {
+            "spent_total": float(sum(spend_map.values())) if spend_map else float(spend_click + spend_order),
+            "spent_click": float(spend_click),
+            "spent_order": float(spend_order),
+        }
+        return spend_map, totals
+
+
+
 perf_id = _get_setting("PERF_CLIENT_ID", "")
 perf_secret = _get_setting("PERF_CLIENT_SECRET", "")
 perf_client: OzonPerfClient | None = None
@@ -1010,6 +1170,26 @@ def load_ads_summary(date_from_str: str, date_to_str: str) -> dict:
     out = {**metrics, "_note": note, "_debug": dbg}
     return out
 
+
+@st.cache_data(ttl=600)
+def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
+    """Точные расходы рекламы по артикулам из отчёта Performance ('Оплата за заказ' + внутри есть 'Оплата за клики').
+    Возвращает словарь: article -> spend_total.
+    """
+    if perf_client is None:
+        return {}
+    spend_map, _totals = perf_client.spend_by_article_from_payperorder(date_from_str, date_to_str)
+    return spend_map
+
+@st.cache_data(ttl=600)
+def load_ads_spend_totals(date_from_str: str, date_to_str: str) -> dict:
+    """Итоги по рекламе из отчёта products (spent_total / click / order)."""
+    if perf_client is None:
+        return {"spent_total": 0.0, "spent_click": 0.0, "spent_order": 0.0}
+    _spend_map, totals = perf_client.spend_by_article_from_payperorder(date_from_str, date_to_str)
+    return totals
+
+
 # ================== SOLD SKU TABLE ==================
 def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
     sku_df = df_ops[df_ops["sku"].notna()].copy()
@@ -1299,6 +1479,21 @@ with tab1:
 
     ads_now = load_ads_summary(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
     ads_prev = load_ads_summary(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+    # --- Точные расходы из products-отчёта (Оплата за заказ/клик) ---
+    ads_tot_now = load_ads_spend_totals(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+    ads_tot_prev = load_ads_spend_totals(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+
+    spent_now_exact = float(ads_tot_now.get("spent_total", 0.0) or 0.0)
+    spent_prev_exact = float(ads_tot_prev.get("spent_total", 0.0) or 0.0)
+
+    # если отчёт дал 0 (не было данных/доступа) — падаем обратно на daily summary
+    spent_now_effective = spent_now_exact if spent_now_exact > 0 else float(ads_now.get("spent", 0.0) or 0.0)
+    spent_prev_effective = spent_prev_exact if spent_prev_exact > 0 else float(ads_prev.get("spent", 0.0) or 0.0)
+
+    # подсказка (чтобы сразу видеть, что мы считаем по 'точной' выгрузке)
+    if spent_now_exact > 0 and abs(spent_now_exact - float(ads_now.get("spent", 0.0) or 0.0)) > 1:
+        st.caption(f"ℹ️ Расход рекламы взят из products-отчёта: {money(spent_now_exact)} (daily summary показывал {money(float(ads_now.get('spent',0) or 0))}).")
+
     # ---- ROAS ----
     def calc_roas(ads: dict) -> float:
         spent = float(ads.get("spent", 0) or 0)
@@ -1322,8 +1517,8 @@ with tab1:
 
     # ads_tiles формируем ВСЕГДА
     ads_tiles = [
-        {"title": "Расход на рекламу", "value": money(ads_now.get("spent", 0.0)),
-         "delta": _delta_pct(_to_float(ads_now.get("spent", 0.0)), _to_float(ads_prev.get("spent", 0.0))),
+        {"title": "Расход на рекламу", "value": money(spent_now_effective),
+         "delta": _delta_pct(_to_float(spent_now_effective), _to_float(spent_prev_effective)),
          "is_expense": True},
 
         {"title": "Выручка с рекламы", "value": money(ads_now.get("revenue", 0.0)),
@@ -1358,9 +1553,8 @@ with tab1:
     )
 
     # --- пересчёт KPI по новым формулам (учитываем рекламу + опер. расходы) ---
-    ads_spent_now = float(ads_now.get("spent", 0.0) or 0.0)
-    ads_spent_prev = float(ads_prev.get("spent", 0.0) or 0.0)
-
+    ads_spent_now = float(spent_now_effective)
+    ads_spent_prev = float(spent_prev_effective)
     net_profit_now = float(k["sales_net"]) - float(k["sale_costs"]) - ads_spent_now - float(k["cogs"]) - float(k["tax"]) - float(opex_now)
     net_profit_prev = float(k_prev["sales_net"]) - float(k_prev["sale_costs"]) - ads_spent_prev - float(k_prev["cogs"]) - float(k_prev["tax"]) - float(opex_prev)
 
@@ -1387,7 +1581,8 @@ with tab1:
         {"title": "Хранение (FBO)", "value": money(k["storage_fbo"]), "delta": _delta_pct(k["storage_fbo"], k_prev["storage_fbo"]), "is_expense": True},
         {"title": "Себестоимость продаж", "value": money(k["cogs"]), "delta": _delta_pct(k["cogs"], k_prev["cogs"]), "is_expense": True, "good_when_up": True},
         {"title": "Налоги/Комиссия", "value": f'{money(k["tax"])} / {money(k["commission_cost"])}', "delta": commission_delta, "is_expense": True},
-]
+        
+    ]
 
     st.markdown("### Ключевые показатели")
     render_tiles(tiles, cols_per_row=4)
@@ -1427,8 +1622,14 @@ with tab1:
         # распределяем: налог, реклама, опер. расходы
         sold_view = allocate_tax_by_share(sold, total_tax)
 
-        ads_spent_now = float(ads_now.get("spent", 0.0) or 0.0)
-        sold_view = allocate_cost_by_share(sold_view, ads_spent_now, "ads_total")
+        ads_spent_now = float(spent_now_effective)  # точный расход из products-отчёта (если доступен)
+        # --- Реклама по артикулам: берём точную разбивку из products-отчёта ---
+        spend_map = load_ads_spend_by_article(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+        sold_view["ads_total"] = sold_view["article"].astype(str).str.strip().map(spend_map).fillna(0.0)
+
+        # Если у товара пустой/неизвестный артикул — можно повесить рекламу по SKU через справочник (fallback)
+        # Но лучше добиться заполнения 'article' в COGS, чтобы реклама распределялась корректно.
+        
 
         # Опер. расходы распределяем пропорционально выручке SKU
         opex_period = opex_sum_period(df_opex, d_from, d_to)
