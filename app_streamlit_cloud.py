@@ -238,6 +238,229 @@ class OzonPerfClient:
         self._token = token
         self._token_ts = now
         return token
+        
+import zipfile
+
+class OzonPerfClient:
+    # ... (всё что у тебя уже есть)
+
+    def _request_bytes(self, method: str, path: str, *, headers=None, params=None, json_body=None, timeout=60) -> bytes:
+        url = self.base_url + path
+        h = {
+            "Accept": "*/*",
+            "Content-Type": "application/json",
+            "User-Agent": "ozon-ads-dashboard/1.0",
+        }
+        if headers:
+            h.update(headers)
+
+        r = requests.request(method=method.upper(), url=url, headers=h, params=params, json=json_body, timeout=timeout)
+        if r.status_code < 200 or r.status_code >= 300:
+            raise RuntimeError(f"{r.status_code} {path}: {r.text}")
+        return r.content
+
+    def _submit_statistics(self, date_from: str, date_to: str, campaign_ids: list[int]) -> str:
+        token = self.get_token()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        payload = {
+            "campaigns": [str(int(x)) for x in (campaign_ids or [])],
+            "dateFrom": date_from,
+            "dateTo": date_to,
+            "groupBy": "NO_GROUP_BY",
+        }
+
+        data = self._request_json("POST", "/api/client/statistics", headers=headers, json_body=payload, timeout=60)
+        # в доках поле "UUID", но иногда может быть "uuid"
+        uuid = data.get("UUID") or data.get("uuid") or data.get("Uuid")
+        if not uuid:
+            raise RuntimeError(f"Не получил UUID из /api/client/statistics. Ответ: {data}")
+        return str(uuid)
+
+    def _try_download_report(self, uuid: str) -> bytes:
+        """
+        Пытаемся скачать готовый отчёт разными путями (у разных аккаунтов/версий API бывает по-разному).
+        """
+        token = self.get_token()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        candidates = [
+            ("/api/client/statistics/report", {"UUID": uuid}),
+            ("/api/client/statistics/report", {"uuid": uuid}),
+            (f"/api/client/statistics/{uuid}/report", None),
+            (f"/api/client/statistics/{uuid}/download", None),
+            (f"/api/client/statistics/download/{uuid}", None),
+        ]
+
+        last_err = None
+        for path, params in candidates:
+            try:
+                return self._request_bytes("GET", path, headers=headers, params=params, timeout=120)
+            except Exception as e:
+                last_err = e
+
+        raise RuntimeError(f"Не удалось скачать отчёт статистики по UUID={uuid}. Последняя ошибка: {last_err}")
+
+    def _wait_until_ready_and_download(self, uuid: str, max_wait_sec: int = 120) -> bytes:
+        """
+        Асинхронный отчёт: ждём готовность, потом скачиваем.
+        Если статус-эндпоинт недоступен/непонятен — пробуем просто скачать несколько раз.
+        """
+        token = self.get_token()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        # возможные эндпоинты статуса (fallback)
+        status_candidates = [
+            (f"/api/client/statistics/{uuid}", None),
+            ("/api/client/statistics", {"UUID": uuid}),
+            ("/api/client/statistics/status", {"UUID": uuid}),
+            ("/api/client/statistics/status", {"uuid": uuid}),
+        ]
+
+        t0 = time.time()
+        attempt = 0
+        while True:
+            attempt += 1
+
+            # 1) пробуем статус
+            for path, params in status_candidates:
+                try:
+                    data = self._request_json("GET", path, headers=headers, params=params, timeout=30)
+                    # разные форматы: status/state/ready
+                    stt = str(data.get("status") or data.get("state") or data.get("Status") or "").lower()
+                    if stt in ("done", "ready", "success", "completed", "finish", "finished"):
+                        return self._try_download_report(uuid)
+                    if stt in ("error", "failed", "fail"):
+                        raise RuntimeError(f"Отчёт упал в статусе ERROR: {data}")
+                except Exception:
+                    pass
+
+            # 2) если статус не сработал — просто пробуем скачать (часто уже готово)
+            try:
+                return self._try_download_report(uuid)
+            except Exception:
+                pass
+
+            if time.time() - t0 >= max_wait_sec:
+                raise RuntimeError("Таймаут ожидания отчёта Performance (/api/client/statistics).")
+
+            time.sleep(2.0)
+
+    @staticmethod
+    def _parse_stats_file_bytes(content: bytes) -> list[pd.DataFrame]:
+        """
+        Возвращает список DataFrame:
+        - если пришёл CSV -> [df]
+        - если пришёл ZIP -> [df1, df2, ...]
+        """
+        if not content:
+            return []
+
+        # ZIP?
+        if content[:2] == b"PK":
+            dfs = []
+            with zipfile.ZipFile(io.BytesIO(content)) as z:
+                for name in z.namelist():
+                    if not name.lower().endswith(".csv"):
+                        continue
+                    raw = z.read(name)
+                    txt = raw.decode("utf-8", errors="ignore").lstrip("\ufeff")
+                    dfs.append(pd.read_csv(io.StringIO(txt), sep="\t", dtype=str, keep_default_na=False))
+                    # иногда CSV может быть с ; — попробуем fallback
+                    if dfs and len(dfs[-1].columns) <= 1 and ";" in txt.splitlines()[1]:
+                        dfs[-1] = pd.read_csv(io.StringIO(txt), sep=";", dtype=str, keep_default_na=False)
+            return dfs
+
+        # иначе считаем что текстовый CSV
+        txt = content.decode("utf-8", errors="ignore").lstrip("\ufeff")
+        try:
+            df = pd.read_csv(io.StringIO(txt), sep="\t", dtype=str, keep_default_na=False)
+            if len(df.columns) <= 1 and ";" in txt.splitlines()[1]:
+                df = pd.read_csv(io.StringIO(txt), sep=";", dtype=str, keep_default_na=False)
+            return [df]
+        except Exception:
+            return []
+
+    @staticmethod
+    def _num_from_any(x) -> float:
+        s = str(x or "").strip()
+        if not s:
+            return 0.0
+        s = s.replace("\u00a0", " ").replace(" ", "")
+        s = s.replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _digits(x) -> str:
+        return "".join(ch for ch in str(x or "") if ch.isdigit())
+
+    def fetch_ads_spend_by_sku(self, date_from: str, date_to: str) -> dict[int, float]:
+        """
+        Реальные расходы по каждому SKU из отчётов Performance:
+        суммирует "Расход" по Ozon ID продвигаемого товара (если есть) иначе по Ozon ID.
+        """
+        if not self.client_id or not self.client_secret:
+            return {}
+
+        # кампании которые пересекаются с периодом
+        camp_ids = self.campaign_ids_overlapping(date_from, date_to, limit=300)
+        if not camp_ids:
+            return {}
+
+        uuid = self._submit_statistics(date_from, date_to, camp_ids)
+        blob = self._wait_until_ready_and_download(uuid, max_wait_sec=180)
+
+        dfs = self._parse_stats_file_bytes(blob)
+        if not dfs:
+            return {}
+
+        spend_by_sku: dict[int, float] = {}
+
+        for df in dfs:
+            if df is None or df.empty:
+                continue
+            cols = [str(c).strip() for c in df.columns]
+            df.columns = cols
+
+            # ищем колонки (как в твоём примере отчёта)
+            # "Ozon ID продвигаемого товара" + "Расход, ?"
+            col_pid = None
+            for cand in ["Ozon ID продвигаемого товара", "Ozon ID продвигаемого товара ", "Ozon ID продвигаемого товара\t"]:
+                if cand in df.columns:
+                    col_pid = cand
+                    break
+            if col_pid is None:
+                # fallback
+                for cand in ["Ozon ID", "OzonID", "SKU", "sku"]:
+                    if cand in df.columns:
+                        col_pid = cand
+                        break
+
+            col_spent = None
+            for cand in ["Расход, ₽", "Расход, ?", "Расход", "Cost", "Spent"]:
+                if cand in df.columns:
+                    col_spent = cand
+                    break
+
+            if not col_pid or not col_spent:
+                continue
+
+            for _, r in df.iterrows():
+                sku_raw = self._digits(r.get(col_pid))
+                if not sku_raw:
+                    continue
+                try:
+                    sku = int(sku_raw)
+                except Exception:
+                    continue
+                spent = self._num_from_any(r.get(col_spent))
+                if spent:
+                    spend_by_sku[sku] = float(spend_by_sku.get(sku, 0.0) + spent)
+
+        return spend_by_sku
 
     # ----------------- helpers -----------------
     @staticmethod
@@ -1009,7 +1232,15 @@ def load_ads_summary(date_from_str: str, date_to_str: str) -> dict:
     metrics, note, dbg = perf_client.fetch_shop_summary(date_from_str, date_to_str)
     out = {**metrics, "_note": note, "_debug": dbg}
     return out
-
+    
+@st.cache_data(ttl=3600)
+def load_ads_spend_by_sku(date_from_str: str, date_to_str: str) -> dict:
+    if perf_client is None:
+        return {}
+    try:
+        return perf_client.fetch_ads_spend_by_sku(date_from_str, date_to_str)
+    except Exception:
+        return {}
 # ================== SOLD SKU TABLE ==================
 def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
     sku_df = df_ops[df_ops["sku"].notna()].copy()
@@ -1428,8 +1659,9 @@ with tab1:
         # распределяем: налог, реклама, опер. расходы
         sold_view = allocate_tax_by_share(sold, total_tax)
 
-        ads_spent_now = float(ads_now.get("spent", 0.0) or 0.0)
-        sold_view = allocate_cost_by_share(sold_view, ads_spent_now, "ads_total")
+        # Реальная реклама по SKU из отчёта Performance
+        spend_map = load_ads_spend_by_sku(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+        sold_view["ads_total"] = sold_view["sku"].map(spend_map).fillna(0.0)
 
         # Опер. расходы распределяем пропорционально выручке SKU
         opex_period = opex_sum_period(df_opex, d_from, d_to)
