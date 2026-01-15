@@ -2006,13 +2006,13 @@ else:
 
     # 2) реклама — прямое сопоставление SKU -> spend
     try:
-    spend_map = load_ads_spend_by_sku(
-        d_from.strftime("%Y-%m-%d"),
-        d_to.strftime("%Y-%m-%d")
-    )
-except Exception as e:
-    st.error(f"load_ads_spend_by_sku упала: {e}")
-    spend_map = {}
+        spend_map = load_ads_spend_by_sku(
+            d_from.strftime("%Y-%m-%d"),
+            d_to.strftime("%Y-%m-%d")
+        )
+    except Exception as e:
+        st.error(f"load_ads_spend_by_sku упала: {e}")
+        spend_map = {}
 
     sold_view["sku"] = pd.to_numeric(sold_view["sku"], errors="coerce").fillna(0).astype(int)
     sold_view["ads_total"] = sold_view["sku"].map(spend_map).fillna(0.0)
