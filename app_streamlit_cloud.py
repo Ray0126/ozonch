@@ -3,6 +3,8 @@ import io
 import time
 import json
 import requests
+import zipfile
+import re
 import streamlit as st
 import pandas as pd
 from datetime import date, timedelta, datetime
@@ -172,7 +174,7 @@ def _sb_replace_all(table: str, rows: list[dict], delete_filter: str) -> None:
 
 
 # ================== PERF API (ADS) ==================
-class OzonPerfClient:
+class :
     """
     Ozon Performance API (ADS) — рабочий вариант под реальный ответ CSV.
 
@@ -241,7 +243,7 @@ class OzonPerfClient:
         
 import zipfile
 
-class OzonPerfClient:
+class :
     # ... (всё что у тебя уже есть)
 
     def _request_bytes(self, method: str, path: str, *, headers=None, params=None, json_body=None, timeout=60) -> bytes:
@@ -673,9 +675,9 @@ class OzonPerfClient:
 
     @staticmethod
     def _pick_num(df: pd.DataFrame, candidates: list[str]) -> float:
-        cols_l = {OzonPerfClient._norm_col(c): c for c in df.columns}
+        cols_l = {._norm_col(c): c for c in df.columns}
         for name in candidates:
-            key = OzonPerfClient._norm_col(name)
+            key = ._norm_col(name)
             if key in cols_l:
                 v = pd.to_numeric(df[cols_l[key]], errors="coerce").fillna(0).sum()
                 try:
@@ -686,7 +688,7 @@ class OzonPerfClient:
 
     @staticmethod
     def _pick_int(df: pd.DataFrame, candidates: list[str]) -> int:
-        return int(round(OzonPerfClient._pick_num(df, candidates)))
+        return int(round(._pick_num(df, candidates)))
 
     def fetch_statistics_daily(self, date_from_str: str, date_to_str: str, campaign_ids: list[int]) -> tuple[dict, dict]:
         token = self.get_token()
@@ -745,6 +747,259 @@ class OzonPerfClient:
 
         metrics = {"spent": spent, "revenue": revenue, "orders": orders, "clicks": float(clicks), "shows": float(shows), "drr": drr, "cpc": cpc, "ctr": ctr}
         return metrics, dbg
+    # ================== NEW: ASYNC STATISTICS REPORT (spend by promoted sku) ==================
+    def _request_raw(self, method: str, path: str, *, headers=None, params=None, json_body=None, timeout=60):
+        url = self.base_url + path
+        h = {"User-Agent": "ozon-ads-dashboard/1.0"}
+        if headers:
+            h.update(headers)
+        r = requests.request(method=method.upper(), url=url, headers=h, params=params, json=json_body, timeout=timeout)
+        return r
+
+    def _parse_money_ru(self, x):
+        # "1 234,56" -> 1234.56
+        if x is None:
+            return 0.0
+        s = str(x).strip()
+        if not s:
+            return 0.0
+        s = s.replace("\u00a0", " ").replace(" ", "")
+        s = s.replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            # иногда попадается мусор типа "—"
+            return 0.0
+
+    def _detect_delimiter(self, text: str) -> str:
+        # в примере из Ozon табы, но часто бывает ;  — попробуем оба
+        head = (text or "")[:2000]
+        if head.count("\t") >= head.count(";"):
+            return "\t"
+        return ";"
+
+    def _read_csv_any(self, raw: bytes) -> pd.DataFrame:
+        # пробуем utf-8-sig, потом cp1251
+        for enc in ("utf-8-sig", "utf-8", "cp1251"):
+            try:
+                txt = raw.decode(enc, errors="strict")
+                txt = txt.lstrip("\ufeff")
+                if not txt.strip():
+                    continue
+                sep = self._detect_delimiter(txt)
+                df = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, keep_default_na=False)
+                df.columns = [str(c).strip() for c in df.columns]
+                return df
+            except Exception:
+                pass
+
+        # последний шанс
+        txt = raw.decode("utf-8", errors="ignore").lstrip("\ufeff")
+        sep = self._detect_delimiter(txt)
+        df = pd.read_csv(io.StringIO(txt), sep=sep, dtype=str, keep_default_na=False)
+        df.columns = [str(c).strip() for c in df.columns]
+        return df
+
+    def _extract_spend_map_from_df(self, df: pd.DataFrame) -> dict[int, float]:
+        """
+        Ищем:
+          - колонку с продвигаемым товаром: "Ozon ID продвигаемого товара" (это и есть SKU/ID товара)
+          - колонку расхода: "Расход, ₽" / "Расход" / "Cost" / "Spent" / "Расход, ?"
+        Суммируем расход по продвигаемому ID.
+        """
+        if df is None or df.empty:
+            return {}
+
+        cols = {str(c).strip().lower(): c for c in df.columns}
+
+        def find_col(cands):
+            for cand in cands:
+                key = cand.lower()
+                for k, orig in cols.items():
+                    if key == k:
+                        return orig
+            # мягкий поиск по вхождению
+            for cand in cands:
+                key = cand.lower()
+                for k, orig in cols.items():
+                    if key in k:
+                        return orig
+            return None
+
+        sku_col = find_col([
+            "ozon id продвигаемого товара",
+            "ozon id promoted product",
+            "promoted product",
+            "продвигаемого товара",
+        ])
+
+        spend_col = find_col([
+            "расход, ₽",
+            "расход",
+            "spent",
+            "cost",
+            "расход, ?",
+        ])
+
+        if not sku_col or not spend_col:
+            return {}
+
+        out: dict[int, float] = {}
+
+        s_sku = df[sku_col].astype(str).str.replace(r"[^\d]", "", regex=True)
+        s_spend = df[spend_col].astype(str)
+
+        for a, b in zip(s_sku.tolist(), s_spend.tolist()):
+            if not a:
+                continue
+            try:
+                sku = int(a)
+            except Exception:
+                continue
+            spend = self._parse_money_ru(b)
+            if spend:
+                out[sku] = out.get(sku, 0.0) + float(spend)
+
+        return out
+
+    def fetch_ads_spend_by_sku_report(self, date_from: str, date_to: str, campaign_ids: list[int]) -> tuple[dict[int, float], dict]:
+        """
+        Делает асинхронный запрос статистики по кампаниям,
+        скачивает CSV или ZIP и собирает spend_map по Ozon ID продвигаемого товара.
+        Возвращает: (spend_map, debug)
+        """
+        token = self.get_token()
+        headers = {"Authorization": f"Bearer {token}"}
+
+        ids = [int(x) for x in (campaign_ids or []) if str(x).isdigit()]
+        if not ids:
+            return {}, {"error": "no campaign ids"}
+
+        # 1) submit
+        submit_body = {
+            "campaigns": [str(x) for x in ids],
+            "dateFrom": date_from,
+            "dateTo": date_to,
+            "groupBy": "NO_GROUP_BY",
+        }
+
+        r0 = self._request_raw("POST", "/api/client/statistics", headers=headers, json_body=submit_body, timeout=60)
+        dbg = {
+            "submit_status": r0.status_code,
+            "submit_text": (r0.text or "")[:500],
+            "campaigns_count": len(ids),
+        }
+        if r0.status_code >= 300:
+            return {}, {**dbg, "error": f"submit failed: {r0.status_code}"}
+
+        try:
+            js = r0.json()
+        except Exception:
+            return {}, {**dbg, "error": "submit not json"}
+
+        uuid = js.get("UUID") or js.get("uuid") or js.get("result") or js.get("id")
+        dbg["uuid"] = uuid
+        if not uuid:
+            return {}, {**dbg, "error": f"no uuid in response: {js}"}
+
+        # 2) poll status (эндпоинты в доке иногда отличаются — делаем несколько попыток)
+        # варианты: /api/client/statistics/state?UUID=..., /api/client/statistics/{uuid}, /api/client/statistics/status?UUID=...
+        status_variants = [
+            ("/api/client/statistics/state", {"UUID": uuid}),
+            (f"/api/client/statistics/{uuid}", None),
+            ("/api/client/statistics/status", {"UUID": uuid}),
+        ]
+
+        state = None
+        for _ in range(30):  # до ~30*2сек = 60 сек
+            time.sleep(2)
+            got = None
+            got_dbg = []
+            for path, params in status_variants:
+                rr = self._request_raw("GET", path, headers=headers, params=params, timeout=30)
+                got_dbg.append({"path": path, "code": rr.status_code, "text": (rr.text or "")[:200]})
+                if rr.status_code < 300:
+                    # пробуем json
+                    try:
+                        got = rr.json()
+                        break
+                    except Exception:
+                        # иногда статус может быть plain text
+                        got = {"raw": rr.text}
+                        break
+            dbg["status_checks"] = got_dbg
+            if got is None:
+                continue
+
+            # возможные поля статуса
+            state = got.get("state") or got.get("status") or got.get("State") or got.get("Status") or got.get("raw")
+            dbg["state_last"] = state
+
+            s = str(state).lower()
+            if any(x in s for x in ("ok", "done", "success", "ready", "completed", "готов")):
+                break
+            if any(x in s for x in ("error", "failed", "fail", "ошиб")):
+                return {}, {**dbg, "error": f"report failed state={state}"}
+
+        # 3) download report (тоже несколько вариантов)
+        download_variants = [
+            ("/api/client/statistics/report", {"UUID": uuid}),
+            ("/api/client/statistics/download", {"UUID": uuid}),
+            (f"/api/client/statistics/{uuid}/report", None),
+            (f"/api/client/statistics/{uuid}/download", None),
+        ]
+
+        blob = None
+        dl_dbg = []
+        for path, params in download_variants:
+            rr = self._request_raw("GET", path, headers=headers, params=params, timeout=120)
+            dl_dbg.append({"path": path, "code": rr.status_code, "ct": rr.headers.get("Content-Type", ""), "len": len(rr.content or b"")})
+            if rr.status_code < 300 and rr.content:
+                blob = rr.content
+                dbg["download_used"] = path
+                dbg["download_ct"] = rr.headers.get("Content-Type", "")
+                break
+        dbg["download_attempts"] = dl_dbg
+
+        if not blob:
+            return {}, {**dbg, "error": "download failed (no blob)"}
+
+        # 4) parse (ZIP or CSV)
+        spend_map: dict[int, float] = {}
+
+        is_zip = False
+        ct = (dbg.get("download_ct") or "").lower()
+        if "zip" in ct:
+            is_zip = True
+        if blob[:2] == b"PK":
+            is_zip = True
+
+        if is_zip:
+            try:
+                with zipfile.ZipFile(io.BytesIO(blob), "r") as z:
+                    names = [n for n in z.namelist() if n.lower().endswith(".csv")]
+                    dbg["zip_files"] = names[:30]
+                    for n in names:
+                        raw = z.read(n)
+                        df = self._read_csv_any(raw)
+                        part = self._extract_spend_map_from_df(df)
+                        for k, v in part.items():
+                            spend_map[k] = spend_map.get(k, 0.0) + float(v)
+            except Exception as e:
+                return {}, {**dbg, "error": f"zip parse failed: {e}"}
+        else:
+            try:
+                df = self._read_csv_any(blob)
+                dbg["csv_cols"] = df.columns.tolist()
+                part = self._extract_spend_map_from_df(df)
+                spend_map.update(part)
+            except Exception as e:
+                return {}, {**dbg, "error": f"csv parse failed: {e}"}
+
+        dbg["spend_map_size"] = len(spend_map)
+        dbg["spend_map_sample"] = list(spend_map.items())[:20]
+
+        return spend_map, dbg
 
     def fetch_shop_summary(self, date_from_str: str, date_to_str: str) -> tuple[dict, str, dict]:
         base = {"spent": 0.0, "revenue": 0.0, "orders": 0, "drr": 0.0, "cpc": 0.0, "ctr": 0.0}
@@ -1741,44 +1996,45 @@ with tab1:
             )
 
     st.markdown("## Список проданных SKU ")
-    if sold is None or sold.empty:
-        st.warning("За выбранный период нет SKU-операций (items[].sku).")
-    else:
-        total_tax = float(sold["accruals_net"].sum()) * 0.06
+if sold is None or sold.empty:
+    st.warning("За выбранный период нет SKU-операций (items[].sku).")
+else:
+    total_tax = float(sold["accruals_net"].sum()) * 0.06
 
-        # распределяем: налог, реклама, опер. расходы
-        sold_view = allocate_tax_by_share(sold, total_tax)
+    # 1) налог
+    sold_view = allocate_tax_by_share(sold, total_tax)
 
-        spend_map = load_ads_spend_by_sku(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+    # 2) реклама — прямое сопоставление SKU -> spend
+    spend_map = load_ads_spend_by_sku(
+        d_from.strftime("%Y-%m-%d"),
+        d_to.strftime("%Y-%m-%d"),
+    )
 
-        # пробуем сматчить напрямую (как будто ключи = sku)
-        direct = sold_view["sku"].map(spend_map).fillna(0.0)
-        
-        # если почти всё по нулям — значит ключи, скорее всего, product_id, делаем product_id -> sku
-        nonzero_cnt = int((direct > 0).sum())
-        if nonzero_cnt == 0 and spend_map:
-            pid_list = list(spend_map.keys())
-            pid_to_sku = product_ids_to_sku_map(pid_list)
-        
-            # перегоняем spend_map(product_id->spent) в spend_by_sku
-            spend_by_sku = {}
-            for pid, spent in spend_map.items():
-                sku = pid_to_sku.get(int(pid))
-                if sku:
-                    spend_by_sku[int(sku)] = float(spend_by_sku.get(int(sku), 0.0) + float(spent))
-        
-            sold_view["ads_total"] = sold_view["sku"].map(spend_by_sku).fillna(0.0)
-        else:
-            sold_view["ads_total"] = direct
+    sold_view["sku"] = pd.to_numeric(sold_view["sku"], errors="coerce").fillna(0).astype(int)
+    sold_view["ads_total"] = sold_view["sku"].map(spend_map).fillna(0.0)
+    st.write("ADS TOTAL SUM:", float(sold_view["ads_total"].sum()))
+
     with st.expander("DEBUG: реклама по SKU", expanded=False):
         st.write("spend_map size:", len(spend_map))
         st.write("spend_map sample:", list(spend_map.items())[:10])
-        # Опер. расходы распределяем пропорционально выручке SKU
-        opex_period = opex_sum_period(df_opex, d_from, d_to)
-        sold_view = allocate_cost_by_share(sold_view, opex_period, "opex_total")
+        st.write("nonzero ads_total:", int((sold_view["ads_total"] > 0).sum()))
 
-        # прибыльные метрики по новым формулам
-        sold_view = compute_profitability(sold_view)
+    # 3) Опер. расходы (распределение)
+    opex_period = opex_sum_period(df_opex, d_from, d_to)
+    sold_view = allocate_cost_by_share(sold_view, opex_period, "opex_total")
+
+    # 4) прибыльные метрики
+    sold_view = compute_profitability(sold_view)
+
+    # 5) DEBUG (только вывод, без расчётов!)
+    with st.expander("DEBUG: реклама по SKU", expanded=False):
+        st.write("spend_map size:", len(spend_map))
+        st.write("spend_map sample:", list(spend_map.items())[:10])
+        st.write("direct nonzero cnt:", nonzero_cnt)
+        if nonzero_cnt == 0 and spend_map:
+            st.write("pid_to_sku sample:", list(pid_to_sku.items())[:10])
+            st.write("spend_by_sku sample:", list(spend_by_sku.items())[:10])
+
 
         show = sold_view.copy()
         show = show.rename(columns={
