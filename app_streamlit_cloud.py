@@ -243,7 +243,7 @@ class OzonPerfClient:
         
 import zipfile
 
-class :
+class OzonPerfClient:
     # ... (всё что у тебя уже есть)
 
     def _request_bytes(self, method: str, path: str, *, headers=None, params=None, json_body=None, timeout=60) -> bytes:
