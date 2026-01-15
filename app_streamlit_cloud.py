@@ -349,13 +349,69 @@ class OzonPerfClient:
     @staticmethod
     def _parse_stats_file_bytes(content: bytes) -> list[pd.DataFrame]:
         """
-        Возвращает список DataFrame:
-        - если пришёл CSV -> [df]
-        - если пришёл ZIP -> [df1, df2, ...]
+        Возвращает список DataFrame.
+        Умеет:
+        - CSV
+        - ZIP (несколько CSV)
+        - пропуск "титульной" первой строки ("Отчет по ...")
+        - fallback на разные разделители (\t и ;)
+        - fallback на cp1251
         """
+        import zipfile
+    
+        def _decode(raw: bytes) -> str:
+            for enc in ("utf-8-sig", "utf-8", "cp1251"):
+                try:
+                    return raw.decode(enc, errors="strict")
+                except Exception:
+                    pass
+            return raw.decode("utf-8", errors="ignore")
+    
+        def _read_csv_text(txt: str) -> pd.DataFrame:
+            txt = (txt or "").lstrip("\ufeff").strip()
+            if not txt:
+                return pd.DataFrame()
+    
+            lines = txt.splitlines()
+            # если первая строка — "Отчет ...", а шапка на 2-й строке
+            skip1 = False
+            if lines and ("отчет" in lines[0].lower() or "отчёт" in lines[0].lower()):
+                skip1 = True
+    
+            # пробуем табы, потом ;
+            for sep in ("\t", ";"):
+                try:
+                    df = pd.read_csv(
+                        io.StringIO(txt),
+                        sep=sep,
+                        dtype=str,
+                        keep_default_na=False,
+                        skiprows=1 if skip1 else 0,
+                    )
+                    # если всё равно 1 колонка — попробуем без skiprows (иногда отчёт без титула)
+                    if len(df.columns) <= 1 and skip1:
+                        df = pd.read_csv(
+                            io.StringIO(txt),
+                            sep=sep,
+                            dtype=str,
+                            keep_default_na=False,
+                            skiprows=0,
+                        )
+                    # если всё равно 1 колонка — вероятно не тот sep
+                    if len(df.columns) > 1:
+                        return df
+                except Exception:
+                    pass
+    
+            # последний шанс
+            try:
+                return pd.read_csv(io.StringIO(txt), dtype=str, keep_default_na=False)
+            except Exception:
+                return pd.DataFrame()
+    
         if not content:
             return []
-
+    
         # ZIP?
         if content[:2] == b"PK":
             dfs = []
@@ -364,34 +420,28 @@ class OzonPerfClient:
                     if not name.lower().endswith(".csv"):
                         continue
                     raw = z.read(name)
-                    txt = raw.decode("utf-8", errors="ignore").lstrip("\ufeff")
-                    dfs.append(pd.read_csv(io.StringIO(txt), sep="\t", dtype=str, keep_default_na=False))
-                    # иногда CSV может быть с ; — попробуем fallback
-                    if dfs and len(dfs[-1].columns) <= 1 and ";" in txt.splitlines()[1]:
-                        dfs[-1] = pd.read_csv(io.StringIO(txt), sep=";", dtype=str, keep_default_na=False)
+                    txt = _decode(raw)
+                    df = _read_csv_text(txt)
+                    if df is not None and not df.empty:
+                        dfs.append(df)
             return dfs
-
-        # иначе считаем что текстовый CSV
-        txt = content.decode("utf-8", errors="ignore").lstrip("\ufeff")
-        try:
-            df = pd.read_csv(io.StringIO(txt), sep="\t", dtype=str, keep_default_na=False)
-            if len(df.columns) <= 1 and ";" in txt.splitlines()[1]:
-                df = pd.read_csv(io.StringIO(txt), sep=";", dtype=str, keep_default_na=False)
-            return [df]
-        except Exception:
-            return []
-
-    @staticmethod
-    def _num_from_any(x) -> float:
-        s = str(x or "").strip()
-        if not s:
-            return 0.0
-        s = s.replace("\u00a0", " ").replace(" ", "")
-        s = s.replace(",", ".")
-        try:
-            return float(s)
-        except Exception:
-            return 0.0
+    
+        # CSV
+        txt = _decode(content)
+        df = _read_csv_text(txt)
+        return [df] if df is not None and not df.empty else []
+    
+        @staticmethod
+        def _num_from_any(x) -> float:
+            s = str(x or "").strip()
+            if not s:
+                return 0.0
+            s = s.replace("\u00a0", " ").replace(" ", "")
+            s = s.replace(",", ".")
+            try:
+                return float(s)
+            except Exception:
+                return 0.0
 
     @staticmethod
     def _digits(x) -> str:
@@ -460,7 +510,18 @@ class OzonPerfClient:
                 if spent:
                     spend_by_sku[sku] = float(spend_by_sku.get(sku, 0.0) + spent)
 
+                # 1) Сначала считаем, что это sku
+        keys = list(spend_by_sku.keys())
+        if not keys:
+            return {}
+        
+        # попробуем проверить пересечение с SKU из операций (быстро, без API)
+        # берём небольшую выборку и считаем, сколько совпадений
+        # (мы не знаем sold_skus внутри класса, поэтому проверим через "разумный" признак: sku обычно 7-9 цифр,
+        # product_id часто тоже, так что лучше сделать проверку на стороне таба — ниже будет 100% вариант)
+        
         return spend_by_sku
+
 
     # ----------------- helpers -----------------
     @staticmethod
@@ -502,6 +563,35 @@ class OzonPerfClient:
             )
 
         return f"Performance API недоступен: {m}"
+    def product_ids_to_sku_map(product_ids: list[int]) -> dict[int, int]:
+        """
+        product_id -> sku (берём первый sku из массива sku)
+        """
+        if not product_ids:
+            return {}
+    
+        url = "https://api-seller.ozon.ru/v2/product/info/list"
+        headers = {"Client-Id": str(client_id), "Api-Key": str(api_key)}
+    
+        out = {}
+        CHUNK = 900  # безопасно
+        for i in range(0, len(product_ids), CHUNK):
+            chunk = product_ids[i:i+CHUNK]
+            body = {"filter": {"product_id": chunk}, "last_id": 0, "limit": len(chunk)}
+            r = requests.post(url, headers=headers, json=body, timeout=60)
+            if r.status_code != 200:
+                continue
+            data = r.json() or {}
+            items = data.get("result", {}).get("items", []) or []
+            for it in items:
+                pid = it.get("product_id")
+                skus = it.get("sku") or []
+                if pid and skus:
+                    try:
+                        out[int(pid)] = int(skus[0])
+                    except Exception:
+                        pass
+        return out
 
     # ----------------- campaigns -----------------
     def list_campaigns(self) -> list[dict]:
@@ -1659,10 +1749,30 @@ with tab1:
         # распределяем: налог, реклама, опер. расходы
         sold_view = allocate_tax_by_share(sold, total_tax)
 
-        # Реальная реклама по SKU из отчёта Performance
         spend_map = load_ads_spend_by_sku(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
-        sold_view["ads_total"] = sold_view["sku"].map(spend_map).fillna(0.0)
 
+        # пробуем сматчить напрямую (как будто ключи = sku)
+        direct = sold_view["sku"].map(spend_map).fillna(0.0)
+        
+        # если почти всё по нулям — значит ключи, скорее всего, product_id, делаем product_id -> sku
+        nonzero_cnt = int((direct > 0).sum())
+        if nonzero_cnt == 0 and spend_map:
+            pid_list = list(spend_map.keys())
+            pid_to_sku = product_ids_to_sku_map(pid_list)
+        
+            # перегоняем spend_map(product_id->spent) в spend_by_sku
+            spend_by_sku = {}
+            for pid, spent in spend_map.items():
+                sku = pid_to_sku.get(int(pid))
+                if sku:
+                    spend_by_sku[int(sku)] = float(spend_by_sku.get(int(sku), 0.0) + float(spent))
+        
+            sold_view["ads_total"] = sold_view["sku"].map(spend_by_sku).fillna(0.0)
+        else:
+            sold_view["ads_total"] = direct
+    with st.expander("DEBUG: реклама по SKU", expanded=False):
+        st.write("spend_map size:", len(spend_map))
+        st.write("spend_map sample:", list(spend_map.items())[:10])
         # Опер. расходы распределяем пропорционально выручке SKU
         opex_period = opex_sum_period(df_opex, d_from, d_to)
         sold_view = allocate_cost_by_share(sold_view, opex_period, "opex_total")
