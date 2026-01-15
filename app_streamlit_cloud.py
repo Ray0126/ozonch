@@ -2005,10 +2005,14 @@ else:
     sold_view = allocate_tax_by_share(sold, total_tax)
 
     # 2) реклама — прямое сопоставление SKU -> spend
+    try:
     spend_map = load_ads_spend_by_sku(
         d_from.strftime("%Y-%m-%d"),
-        d_to.strftime("%Y-%m-%d"),
+        d_to.strftime("%Y-%m-%d")
     )
+except Exception as e:
+    st.error(f"load_ads_spend_by_sku упала: {e}")
+    spend_map = {}
 
     sold_view["sku"] = pd.to_numeric(sold_view["sku"], errors="coerce").fillna(0).astype(int)
     sold_view["ads_total"] = sold_view["sku"].map(spend_map).fillna(0.0)
@@ -2030,7 +2034,7 @@ else:
     with st.expander("DEBUG: реклама по SKU", expanded=False):
         st.write("spend_map size:", len(spend_map))
         st.write("spend_map sample:", list(spend_map.items())[:10])
-        st.write("direct nonzero cnt:", nonzero_cnt)
+        st.write("nonzero ads_total:", int((sold_view["ads_total"] > 0).sum()))
         if nonzero_cnt == 0 and spend_map:
             st.write("pid_to_sku sample:", list(pid_to_sku.items())[:10])
             st.write("spend_by_sku sample:", list(spend_by_sku.items())[:10])
