@@ -677,7 +677,7 @@ class OzonPerfClient:
     def _pick_num(df: pd.DataFrame, candidates: list[str]) -> float:
         cols_l = {self._norm_col(c): c for c in df.columns}
         for name in candidates:
-            key = ._norm_col(name)
+            key = self._norm_col(name)
             if key in cols_l:
                 v = pd.to_numeric(df[cols_l[key]], errors="coerce").fillna(0).sum()
                 try:
