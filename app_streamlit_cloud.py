@@ -688,7 +688,7 @@ class OzonPerfClient:
 
     @staticmethod
     def _pick_int(df: pd.DataFrame, candidates: list[str]) -> int:
-        return int(round(._pick_num(df, candidates)))
+        return int(round(self._pick_num(df, candidates)))
 
     def fetch_statistics_daily(self, date_from_str: str, date_to_str: str, campaign_ids: list[int]) -> tuple[dict, dict]:
         token = self.get_token()
