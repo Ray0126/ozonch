@@ -1010,6 +1010,234 @@ def load_ads_summary(date_from_str: str, date_to_str: str) -> dict:
     out = {**metrics, "_note": note, "_debug": dbg}
     return out
 
+
+
+
+@st.cache_data(ttl=600)
+def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
+    """Возвращает распределение рекламных расходов по Артикулу за период.
+
+    Источник: Performance API
+      - GET /api/client/statistics/daily (CSV) -> расходы по кампаниям и дням
+      - GET /api/client/campaign/{campaign_id}/objects (JSON) -> список SKU в кампании
+
+    Маппинг SKU -> Артикул берём из текущей COGS-таблицы (которая, в облаке, хранится в Supabase).
+    Нераспределённый остаток (если для кампании нет ни одного SKU с артикулом) кладём в __OTHER_ADS__,
+    чтобы сумма по дням и по периоду совпала с "как в кабинете".
+    """
+
+    out = {"by_article": {}, "total": 0.0, "other": 0.0, "note": "", "debug": {}}
+
+    # PERF creds обязательны
+    perf_id = _get_setting("PERF_CLIENT_ID", "").strip()
+    perf_secret = _get_setting("PERF_CLIENT_SECRET", "").strip()
+    if not perf_id or not perf_secret:
+        out["note"] = "Performance: PERF_CLIENT_ID / PERF_CLIENT_SECRET не заданы — реклама по артикулам недоступна."
+        return out
+
+    base = "https://api-performance.ozon.ru/api/client"
+
+    def _get_token() -> str:
+        r = requests.post(
+            f"{base}/token",
+            json={
+                "client_id": int(perf_id) if perf_id.isdigit() else perf_id,
+                "client_secret": perf_secret,
+                "grant_type": "client_credentials",
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        return r.json()["access_token"]
+
+    def _headers(token: str) -> dict:
+        return {"Authorization": f"Bearer {token}", "Accept": "*/*", "User-Agent": "ozon-ads-dashboard/1.0"}
+
+    def _parse_ru_money(s: str) -> float:
+        s = (s or "").strip().replace("\ufeff", "").replace("\xa0", "").replace(" ", "").replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
+
+    def _parse_daily(csv_text: str) -> list[dict]:
+        rows = []
+        lines = (csv_text or "").splitlines()
+        if lines and lines[0].startswith("\ufeff"):
+            lines[0] = lines[0].replace("\ufeff", "")
+        if not lines:
+            return rows
+
+        import csv as _csv
+        reader = _csv.DictReader(lines, delimiter=";")
+        for r in reader:
+            cid = str((r.get("ID") or "")).strip()
+            d = str((r.get("Дата") or "")).strip()[:10]
+            spend = _parse_ru_money(str(r.get("Расход, ₽") or r.get("Расход") or "0"))
+            if not cid or not d:
+                continue
+            if spend == 0:
+                continue
+            rows.append({"campaign_id": cid, "date": d, "spend": float(spend)})
+        return rows
+
+    def _get_campaign_objects(token: str, campaign_id: str) -> list[str]:
+        url = f"{base}/campaign/{campaign_id}/objects"
+        while True:
+            r = requests.get(url, headers=_headers(token), timeout=30)
+            if r.status_code == 429:
+                time.sleep(30)
+                continue
+            r.raise_for_status()
+            data = r.json()
+            skus = []
+            if isinstance(data, dict) and isinstance(data.get("list"), list):
+                for item in data["list"]:
+                    if isinstance(item, dict) and "id" in item:
+                        skus.append(str(item["id"]).strip())
+            return [s for s in skus if s]
+
+    # Маппинг SKU->Артикул из COGS (Supabase / локальный файл)
+    cogs_local = load_cogs()
+    sku2art = {}
+    if cogs_local is not None and not cogs_local.empty:
+        try:
+            tmp = cogs_local[["sku", "article"]].copy()
+            tmp["sku"] = pd.to_numeric(tmp["sku"], errors="coerce").astype("Int64")
+            tmp = tmp.dropna(subset=["sku"]).copy()
+            tmp["sku"] = tmp["sku"].astype(int).astype(str)
+            tmp["article"] = tmp["article"].fillna("").astype(str).str.strip()
+            sku2art = {r["sku"]: r["article"] for _, r in tmp.iterrows() if r["sku"] and r["article"]}
+        except Exception:
+            sku2art = {}
+
+    token = _get_token()
+
+    # daily CSV (по всем кампаниям)
+    r = requests.get(
+        f"{base}/statistics/daily",
+        headers=_headers(token),
+        params={"dateFrom": date_from_str, "dateTo": date_to_str},
+        timeout=120,
+    )
+    r.raise_for_status()
+    daily_rows = _parse_daily(r.text)
+
+    # TOTAL по дням (как в кабинете)
+    total_by_day = {}
+    for row in daily_rows:
+        total_by_day[row["date"]] = total_by_day.get(row["date"], 0.0) + float(row["spend"])
+
+    camp2skus = {}
+    agg = {}  # (date, article) -> spend
+
+    for row in daily_rows:
+        cid = row["campaign_id"]
+        d = row["date"]
+        spend = float(row["spend"])
+
+        if cid not in camp2skus:
+            camp2skus[cid] = _get_campaign_objects(token, cid)
+            time.sleep(0.2)
+
+        skus = camp2skus[cid] or []
+        if not skus:
+            continue
+
+        # артикулы по sku
+        arts = []
+        for sku in skus:
+            art = sku2art.get(str(sku))
+            if art:
+                arts.append(art)
+
+        # если не смогли привязать — пусть уйдёт в OTHER (ниже)
+        if not arts:
+            continue
+
+        # ВАЖНО: делим расход кампании поровну между найденными артикулами (как в твоём рабочем скрипте)
+        part = spend / len(arts)
+        for art in arts:
+            key = (d, art)
+            agg[key] = agg.get(key, 0.0) + part
+
+    # сколько распределили по дням
+    alloc_by_day = {}
+    for (d, _a), v in agg.items():
+        alloc_by_day[d] = alloc_by_day.get(d, 0.0) + float(v)
+
+    # добиваем OTHER, чтобы дневные суммы совпали
+    for d, total in total_by_day.items():
+        alloc = alloc_by_day.get(d, 0.0)
+        diff = float(total) - float(alloc)
+        if abs(diff) >= 0.01:
+            key = (d, "__OTHER_ADS__")
+            agg[key] = agg.get(key, 0.0) + diff
+
+    # агрегируем по артикулу за период
+    by_article = {}
+    for (_d, art), v in agg.items():
+        by_article[art] = by_article.get(art, 0.0) + float(v)
+
+    total = float(sum(by_article.values()))
+    other = float(by_article.get("__OTHER_ADS__", 0.0))
+
+    out["by_article"] = by_article
+    out["total"] = total
+    out["other"] = other
+    out["debug"] = {
+        "daily_rows_with_spend": int(len(daily_rows)),
+        "campaigns_cached": int(len(camp2skus)),
+        "sku2art_size": int(len(sku2art)),
+    }
+    return out
+
+
+def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd.DataFrame:
+    """Распределяем рекламу по SKU-строкам, но так, чтобы сумма по одному артикулу сохранялась.
+
+    ads_by_article: dict {article: spend_total_for_period}
+    """
+    out = sku_table.copy()
+    if out is None or out.empty:
+        out["ads_total"] = 0.0
+        return out
+
+    if "article" not in out.columns:
+        out["article"] = ""
+    out["article"] = out["article"].fillna("").astype(str).str.strip()
+
+    # база для долей внутри артикула: выручка SKU
+    base = pd.to_numeric(out.get("accruals_net", 0.0), errors="coerce").fillna(0.0)
+    out["_ads_base"] = base
+
+    out["ads_total"] = 0.0
+
+    # распределяем внутри каждого артикула
+    for art, spend in (ads_by_article or {}).items():
+        spend = float(spend or 0.0)
+        if spend == 0:
+            continue
+
+        mask = out["article"].eq(str(art))
+        if not mask.any():
+            continue
+
+        s = out.loc[mask, "_ads_base"]
+        denom = float(s.sum())
+        if denom > 0:
+            out.loc[mask, "ads_total"] = spend * (s / denom)
+        else:
+            # если выручки нет — делим поровну
+            n = int(mask.sum())
+            out.loc[mask, "ads_total"] = spend / max(n, 1)
+
+    # Остаток OTHER не распределяем по SKU (чтобы не искажать товары),
+    # но он будет учтён в плитке "Расход на рекламу" (total включает OTHER).
+    out = out.drop(columns=["_ads_base"], errors="ignore")
+    return out
+
+
 # ================== SOLD SKU TABLE ==================
 def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
     sku_df = df_ops[df_ops["sku"].notna()].copy()
@@ -1297,8 +1525,19 @@ with tab1:
     k = calc_kpi(df_ops, sold)
     k_prev = calc_kpi(df_ops_prev, sold_prev)
 
-    ads_now = load_ads_summary(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
-    ads_prev = load_ads_summary(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+    ads_now_raw = load_ads_summary(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+    ads_prev_raw = load_ads_summary(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+
+    # Распределение рекламных расходов по артикулам (точнее, чем пропорция выручке)
+    ads_alloc_now = load_ads_spend_by_article(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+    ads_alloc_prev = load_ads_spend_by_article(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+
+    # Берём расход из распределения (total включает __OTHER_ADS__ и совпадает с "как в кабинете")
+    ads_now = {**ads_now_raw}
+    ads_prev = {**ads_prev_raw}
+    ads_now["spent"] = float(ads_alloc_now.get("total", 0.0) or 0.0)
+    ads_prev["spent"] = float(ads_alloc_prev.get("total", 0.0) or 0.0)
+
     # ---- ROAS ----
     def calc_roas(ads: dict) -> float:
         spent = float(ads.get("spent", 0) or 0)
@@ -1319,6 +1558,8 @@ with tab1:
     # note можно показывать отдельно
     if ads_now.get("_note"):
         st.info(ads_now["_note"])
+    if ads_alloc_now.get("note"):
+        st.info(ads_alloc_now["note"])
 
     # ads_tiles формируем ВСЕГДА
     ads_tiles = [
@@ -1428,7 +1669,7 @@ with tab1:
         sold_view = allocate_tax_by_share(sold, total_tax)
 
         ads_spent_now = float(ads_now.get("spent", 0.0) or 0.0)
-        sold_view = allocate_cost_by_share(sold_view, ads_spent_now, "ads_total")
+        sold_view = allocate_ads_by_article(sold_view, ads_alloc_now.get("by_article", {}))
 
         # Опер. расходы распределяем пропорционально выручке SKU
         opex_period = opex_sum_period(df_opex, d_from, d_to)
