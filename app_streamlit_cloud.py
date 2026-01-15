@@ -174,7 +174,7 @@ def _sb_replace_all(table: str, rows: list[dict], delete_filter: str) -> None:
 
 
 # ================== PERF API (ADS) ==================
-class:
+class OzonPerfClient:
     """
     Ozon Performance API (ADS) — рабочий вариант под реальный ответ CSV.
 
