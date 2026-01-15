@@ -1387,8 +1387,7 @@ with tab1:
         {"title": "Хранение (FBO)", "value": money(k["storage_fbo"]), "delta": _delta_pct(k["storage_fbo"], k_prev["storage_fbo"]), "is_expense": True},
         {"title": "Себестоимость продаж", "value": money(k["cogs"]), "delta": _delta_pct(k["cogs"], k_prev["cogs"]), "is_expense": True, "good_when_up": True},
         {"title": "Налоги/Комиссия", "value": f'{money(k["tax"])} / {money(k["commission_cost"])}', "delta": commission_delta, "is_expense": True},
-        {"title": "Реклама (расход)", "value": money(ads_spent_now), "delta": _delta_pct(ads_spent_now, ads_spent_prev), "is_expense": True},
-    ]
+]
 
     st.markdown("### Ключевые показатели")
     render_tiles(tiles, cols_per_row=4)
