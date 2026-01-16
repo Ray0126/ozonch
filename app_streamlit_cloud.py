@@ -2401,63 +2401,52 @@ with tab3:
     p.empty()
 
     df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
-    sku_df = df[df["sku"].notna()].copy()
-    if sku_df.empty:
+
+    # === ABC: считаем прибыль по той же логике, что и в TAB1 (налог + реклама + opex + cogs) ===
+
+    # соберём SoldSKU таблицу на весь выбранный период
+    sold_all = build_sold_sku_table(df, cogs_df)
+    if sold_all is None or sold_all.empty:
         st.info("Нет операций со SKU за выбранный период.")
         st.stop()
 
-    sku_df["sku"] = pd.to_numeric(sku_df["sku"], errors="coerce").astype("Int64")
-    sku_df = sku_df.dropna(subset=["sku"]).copy()
-    sku_df["sku"] = sku_df["sku"].astype(int)
+    # границы периода ABC
+    d_from_abc = min(month_start_end(y, m)[0] for (y, m) in selected_months)
+    d_to_abc   = max(month_start_end(y, m)[1] for (y, m) in selected_months)
 
-    sku_df["qty_orders"] = sku_df.apply(lambda r: r["qty"] if r["type"]=="orders" else 0, axis=1)
-    sku_df["qty_returns"] = sku_df.apply(lambda r: r["qty"] if r["type"]=="returns" else 0, axis=1)
+    # налог
+    total_tax = float(sold_all["accruals_net"].sum()) * 0.06
+    sold_view = allocate_tax_by_share(sold_all, total_tax)
 
-    g = sku_df.groupby(["sku","name"], as_index=False).agg(
-        qty_orders=("qty_orders","sum"),
-        qty_returns=("qty_returns","sum"),
-        accruals=("accruals_for_sale","sum"),
-        profit=("amount","sum")
-    )
-    g["buyout_qty"] = (g["qty_orders"] - g["qty_returns"]).clip(lower=0)
+    # реклама по артикулам (из Performance daily + objects + сопоставление SKU->Артикул из COGS/Supabase)
+    ads_alloc = load_ads_spend_by_article(d_from_abc.strftime("%Y-%m-%d"), d_to_abc.strftime("%Y-%m-%d"))
+    sold_view = allocate_ads_by_article(sold_view, ads_alloc)
 
-    # --- Артикулы из COGS (как в рабочей версии) ---
-    if cogs_df is not None and not cogs_df.empty:
-        c2 = cogs_df[["sku", "article"]].copy()
-        c2["sku"] = pd.to_numeric(c2["sku"], errors="coerce").astype("Int64")
-        c2 = c2.dropna(subset=["sku"]).copy()
-        c2["sku"] = c2["sku"].astype(int)
-        c2["article"] = c2["article"].fillna("").astype(str)
+    # OPEX распределяем пропорционально выручке
+    opex_abc = opex_sum_period(df_opex, d_from_abc, d_to_abc)
+    sold_view = allocate_cost_by_share(sold_view, opex_abc, "opex_total")
 
-        g["sku"] = pd.to_numeric(g["sku"], errors="coerce").astype("Int64")
-        g = g.dropna(subset=["sku"]).copy()
-        g["sku"] = g["sku"].astype(int)
+    # прибыль по полной формуле
+    sold_view = compute_profitability(sold_view)
 
-        g = g.merge(c2.drop_duplicates("sku"), on="sku", how="left")
+    # агрегат для ABC
+    g = sold_view.rename(columns={"sku": "SKU", "name": "name"}).copy()
+    g["sku"] = pd.to_numeric(g.get("SKU"), errors="coerce").astype("Int64")
+    g = g.dropna(subset=["sku"]).copy()
+    g["sku"] = g["sku"].astype(int)
 
+    g = g.rename(columns={"sku": "sku"})
+    g["buyout_qty"] = pd.to_numeric(g.get("qty_buyout", 0), errors="coerce").fillna(0).astype(int)
+    g["accruals"] = pd.to_numeric(g.get("accruals_net", 0.0), errors="coerce").fillna(0.0)
+    g["profit"] = pd.to_numeric(g.get("profit", 0.0), errors="coerce").fillna(0.0)
+
+    # артикул
     if "article" not in g.columns:
         g["article"] = ""
     g["article"] = g["article"].fillna("").astype(str)
 
-    # --- заполнение пустых артикулов по совпадению названия товара ---
-    try:
-        known = g[(g["article"].astype(str).str.strip() != "") & g["name"].notna()].copy()
-        if not known.empty:
-            name_to_article = (
-                known.assign(_a=known["article"].astype(str).str.strip())
-                .groupby("name")["_a"]
-                .agg(lambda s: s.value_counts().index[0])
-            )
-            mask_empty = g["article"].astype(str).str.strip() == ""
-            g.loc[mask_empty, "article"] = (
-                g.loc[mask_empty, "name"]
-                .map(name_to_article)
-                .apply(lambda a: f"Дубль ({a})" if isinstance(a, str) and a.strip() else "")
-            )
-    except Exception:
-        pass
-    g["article"] = g["article"].fillna("").astype(str)
-
+    # оставим только нужные колонки для ABC ниже
+    g = g[["sku", "article", "name", "buyout_qty", "accruals", "profit"]].copy()
     if only_profit:
         g = g[g["profit"] > 0].copy()
 
