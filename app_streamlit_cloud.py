@@ -1036,6 +1036,7 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
         return out
 
     base = "https://api-performance.ozon.ru/api/client"
+    RETRY_429_SLEEP = 30  # сек, если упёрлись в лимит 429
 
     def _get_token() -> str:
         r = requests.post(
@@ -1114,14 +1115,41 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
     token = _get_token()
 
     # daily CSV (по всем кампаниям)
-    r = requests.get(
-        f"{base}/statistics/daily",
-        headers=_headers(token),
-        params={"dateFrom": date_from_str, "dateTo": date_to_str},
-        timeout=120,
-    )
-    r.raise_for_status()
-    daily_rows = _parse_daily(r.text)
+    # ВАЖНО: у Performance API часто есть лимит периода (обычно 62 дня).
+    # Поэтому делаем чанки, чтобы не падать 400/HTTPError на больших диапазонах (например в ABC).
+    def _iter_chunks(d1, d2, max_days: int = 62):
+        cur = d1
+        while cur <= d2:
+            to = min(cur + timedelta(days=max_days - 1), d2)
+            yield cur, to
+            cur = to + timedelta(days=1)
+
+    d1 = datetime.strptime(date_from_str, "%Y-%m-%d").date()
+    d2 = datetime.strptime(date_to_str, "%Y-%m-%d").date()
+
+    daily_rows = []
+    for a, b in _iter_chunks(d1, d2, max_days=62):
+        a_s = a.strftime("%Y-%m-%d")
+        b_s = b.strftime("%Y-%m-%d")
+
+        # retry 429
+        while True:
+            r = requests.get(
+                f"{base}/statistics/daily",
+                headers=_headers(token),
+                params={"dateFrom": a_s, "dateTo": b_s},
+                timeout=120,
+            )
+            if r.status_code == 429:
+                time.sleep(RETRY_429_SLEEP)
+                continue
+            break
+
+        if r.status_code != 200:
+            # Дадим понятную причину, иначе Streamlit Cloud редактирует сообщение.
+            raise RuntimeError(f"ADS daily error {r.status_code} for {a_s}..{b_s}: {r.text[:800]}")
+
+        daily_rows.extend(_parse_daily(r.text))
 
     # TOTAL по дням (как в кабинете)
     total_by_day = {}
