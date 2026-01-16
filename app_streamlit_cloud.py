@@ -1015,31 +1015,43 @@ def load_ads_summary(date_from_str: str, date_to_str: str) -> dict:
 
 @st.cache_data(ttl=600)
 def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
-    """Возвращает распределение рекламных расходов по Артикулу за период.
+    """
+    Распределение рекламных расходов по Артикулу за период.
 
-    Источник: Performance API
-      - GET /api/client/statistics/daily (CSV) -> расходы по кампаниям и дням
-      - GET /api/client/campaign/{campaign_id}/objects (JSON) -> список SKU в кампании
+    Источник:
+      - GET /api/client/statistics/daily (CSV): расходы по кампаниям и дням
+      - GET /api/client/campaign/{campaign_id}/objects (JSON): список SKU в кампании
 
-    Маппинг SKU -> Артикул берём из текущей COGS-таблицы (которая, в облаке, хранится в Supabase).
-    Нераспределённый остаток (если для кампании нет ни одного SKU с артикулом) кладём в __OTHER_ADS__,
-    чтобы сумма по дням и по периоду совпала с "как в кабинете".
+    Маппинг SKU -> Артикул берём из COGS (load_cogs()).
+    Нераспределённый остаток добиваем в __OTHER_ADS__ так, чтобы дневные суммы и итог совпали с кабинетом.
+
+    Поведение "cloud-safe":
+      - не падаем по HTTPError
+      - ограничиваем ретраи и общее время на 1 кампанию
+      - если кампанию не удалось разобрать (429/5xx/таймаут) — её расход попадёт в __OTHER_ADS__
     """
 
     out = {"by_article": {}, "total": 0.0, "other": 0.0, "note": "", "debug": {}}
 
-    # PERF creds обязательны
     perf_id = _get_setting("PERF_CLIENT_ID", "").strip()
     perf_secret = _get_setting("PERF_CLIENT_SECRET", "").strip()
     if not perf_id or not perf_secret:
         out["note"] = "Performance: PERF_CLIENT_ID / PERF_CLIENT_SECRET не заданы — реклама по артикулам недоступна."
         return out
 
-    base = "https://api-performance.ozon.ru/api/client"
+    BASE = "https://api-performance.ozon.ru/api/client"
+
+    # --- настройки ограничений (важно для Streamlit Cloud) ---
+    OBJ_MAX_RETRIES = 6          # максимум попыток на objects одной кампании
+    OBJ_TIMEOUT_SEC = 20         # timeout одного запроса objects
+    OBJ_TOTAL_BUDGET_SEC = 60    # максимум времени на одну кампанию (в сумме по ретраям)
+    DAILY_TIMEOUT_SEC = 120      # daily обычно крупный
+    SLEEP_BETWEEN_CALLS = 0.15   # чуть разгружаем API
+    RETRY_429_BASE_SLEEP = 2.0   # базовая пауза при 429 (будет расти)
 
     def _get_token() -> str:
         r = requests.post(
-            f"{base}/token",
+            f"{BASE}/token",
             json={
                 "client_id": int(perf_id) if perf_id.isdigit() else perf_id,
                 "client_secret": perf_secret,
@@ -1048,10 +1060,18 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
             timeout=30,
         )
         r.raise_for_status()
-        return r.json()["access_token"]
+        data = r.json()
+        token = data.get("access_token")
+        if not token:
+            raise RuntimeError(f"Не получил access_token: {data}")
+        return token
 
     def _headers(token: str) -> dict:
-        return {"Authorization": f"Bearer {token}", "Accept": "*/*", "User-Agent": "ozon-ads-dashboard/1.0"}
+        return {
+            "Authorization": f"Bearer {token}",
+            "Accept": "*/*",
+            "User-Agent": "ozon-ads-dashboard/1.0",
+        }
 
     def _parse_ru_money(s: str) -> float:
         s = (s or "").strip().replace("\ufeff", "").replace("\xa0", "").replace(" ", "").replace(",", ".")
@@ -1061,14 +1081,15 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
             return 0.0
 
     def _parse_daily(csv_text: str) -> list[dict]:
+        import csv as _csv
+
         rows = []
         lines = (csv_text or "").splitlines()
-        if lines and lines[0].startswith("\ufeff"):
-            lines[0] = lines[0].replace("\ufeff", "")
         if not lines:
             return rows
+        if lines[0].startswith("\ufeff"):
+            lines[0] = lines[0].replace("\ufeff", "")
 
-        import csv as _csv
         reader = _csv.DictReader(lines, delimiter=";")
         for r in reader:
             cid = str((r.get("ID") or "")).strip()
@@ -1081,55 +1102,123 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
             rows.append({"campaign_id": cid, "date": d, "spend": float(spend)})
         return rows
 
-    def _get_campaign_objects(token: str, campaign_id: str) -> list[str]:
-        url = f"{base}/campaign/{campaign_id}/objects"
-        while True:
-            r = requests.get(url, headers=_headers(token), timeout=30)
-            if r.status_code == 429:
-                time.sleep(30)
-                continue
-            r.raise_for_status()
-            data = r.json()
-            skus = []
-            if isinstance(data, dict) and isinstance(data.get("list"), list):
-                for item in data["list"]:
-                    if isinstance(item, dict) and "id" in item:
-                        skus.append(str(item["id"]).strip())
-            return [s for s in skus if s]
+    def _get_campaign_objects_cloudsafe(token: str, campaign_id: str) -> tuple[list[str], str]:
+        """
+        Возвращает (skus, status):
+          status:
+            - "ok"
+            - "rate_limited" (429)
+            - "http_error:<code>"
+            - "timeout"
+            - "bad_json"
+            - "unknown_error"
+            - "budget_exceeded"
+        """
+        url = f"{BASE}/campaign/{campaign_id}/objects"
+        t0 = time.time()
+        last_status = "unknown_error"
 
-    # Маппинг SKU->Артикул из COGS (Supabase / локальный файл)
-    cogs_local = load_cogs()
+        for attempt in range(1, OBJ_MAX_RETRIES + 1):
+            # бюджет по времени на кампанию
+            if (time.time() - t0) > OBJ_TOTAL_BUDGET_SEC:
+                return [], "budget_exceeded"
+
+            try:
+                r = requests.get(url, headers=_headers(token), timeout=OBJ_TIMEOUT_SEC)
+
+                if r.status_code == 429:
+                    # backoff
+                    last_status = "rate_limited"
+                    sleep_s = RETRY_429_BASE_SLEEP * (attempt ** 1.3)
+                    time.sleep(min(sleep_s, 15.0))
+                    continue
+
+                if r.status_code >= 300:
+                    last_status = f"http_error:{r.status_code}"
+                    # на 5xx можно попробовать ещё раз, на 4xx (кроме 429) обычно смысла нет
+                    if 500 <= r.status_code <= 599:
+                        time.sleep(1.0 + attempt * 0.5)
+                        continue
+                    return [], last_status
+
+                try:
+                    data = r.json()
+                except Exception:
+                    return [], "bad_json"
+
+                skus = []
+                if isinstance(data, dict) and isinstance(data.get("list"), list):
+                    for item in data["list"]:
+                        if isinstance(item, dict) and "id" in item:
+                            skus.append(str(item["id"]).strip())
+
+                skus = [s for s in skus if s]
+                return skus, "ok"
+
+            except requests.exceptions.Timeout:
+                last_status = "timeout"
+                time.sleep(0.8 + attempt * 0.4)
+                continue
+            except Exception:
+                last_status = "unknown_error"
+                time.sleep(0.8 + attempt * 0.4)
+                continue
+
+        return [], last_status
+
+    # --- SKU -> ARTICLE из COGS ---
     sku2art = {}
-    if cogs_local is not None and not cogs_local.empty:
-        try:
+    try:
+        cogs_local = load_cogs()
+        if cogs_local is not None and not cogs_local.empty:
             tmp = cogs_local[["sku", "article"]].copy()
             tmp["sku"] = pd.to_numeric(tmp["sku"], errors="coerce").astype("Int64")
             tmp = tmp.dropna(subset=["sku"]).copy()
             tmp["sku"] = tmp["sku"].astype(int).astype(str)
             tmp["article"] = tmp["article"].fillna("").astype(str).str.strip()
             sku2art = {r["sku"]: r["article"] for _, r in tmp.iterrows() if r["sku"] and r["article"]}
-        except Exception:
-            sku2art = {}
+    except Exception:
+        sku2art = {}
 
-    token = _get_token()
+    # --- токен + daily ---
+    try:
+        token = _get_token()
+    except Exception as e:
+        out["note"] = f"Performance token error: {e}"
+        return out
 
-    # daily CSV (по всем кампаниям)
-    r = requests.get(
-        f"{base}/statistics/daily",
-        headers=_headers(token),
-        params={"dateFrom": date_from_str, "dateTo": date_to_str},
-        timeout=120,
-    )
-    r.raise_for_status()
-    daily_rows = _parse_daily(r.text)
+    try:
+        r = requests.get(
+            f"{BASE}/statistics/daily",
+            headers=_headers(token),
+            params={"dateFrom": date_from_str, "dateTo": date_to_str},
+            timeout=DAILY_TIMEOUT_SEC,
+        )
+        if r.status_code >= 300:
+            out["note"] = f"Performance daily error: {r.status_code}"
+            out["debug"] = {"daily_status": r.status_code, "daily_text_head": (r.text or "")[:400]}
+            return out
+        daily_rows = _parse_daily(r.text)
+    except Exception as e:
+        out["note"] = f"Performance daily request failed: {e}"
+        return out
 
-    # TOTAL по дням (как в кабинете)
-    total_by_day = {}
+    # --- TOTAL по дням (как в кабинете) ---
+    total_by_day: dict[str, float] = {}
     for row in daily_rows:
-        total_by_day[row["date"]] = total_by_day.get(row["date"], 0.0) + float(row["spend"])
+        d = row["date"]
+        total_by_day[d] = total_by_day.get(d, 0.0) + float(row["spend"])
 
-    camp2skus = {}
-    agg = {}  # (date, article) -> spend
+    # --- распределение ---
+    camp2skus: dict[str, list[str]] = {}
+    camp2status: dict[str, str] = {}
+    agg: dict[tuple[str, str], float] = {}   # (date, article) -> spend
+
+    # статистика "почему ушло в OTHER"
+    skipped_campaigns = 0
+    failed_campaigns = 0
+    empty_objects_campaigns = 0
+    no_mapping_campaigns = 0
 
     for row in daily_rows:
         cid = row["campaign_id"]
@@ -1137,11 +1226,21 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
         spend = float(row["spend"])
 
         if cid not in camp2skus:
-            camp2skus[cid] = _get_campaign_objects(token, cid)
-            time.sleep(0.2)
+            skus, status = _get_campaign_objects_cloudsafe(token, cid)
+            camp2skus[cid] = skus
+            camp2status[cid] = status
+            time.sleep(SLEEP_BETWEEN_CALLS)
 
-        skus = camp2skus[cid] or []
+        skus = camp2skus.get(cid) or []
+        status = camp2status.get(cid, "unknown_error")
+
+        if status != "ok":
+            # не смогли получить objects -> пусть расход уходит в OTHER (через diff ниже)
+            failed_campaigns += 1
+            continue
+
         if not skus:
+            empty_objects_campaigns += 1
             continue
 
         # артикулы по sku
@@ -1151,22 +1250,21 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
             if art:
                 arts.append(art)
 
-        # если не смогли привязать — пусть уйдёт в OTHER (ниже)
         if not arts:
+            no_mapping_campaigns += 1
             continue
 
-        # ВАЖНО: делим расход кампании поровну между найденными артикулами (как в твоём рабочем скрипте)
         part = spend / len(arts)
         for art in arts:
             key = (d, art)
             agg[key] = agg.get(key, 0.0) + part
 
-    # сколько распределили по дням
-    alloc_by_day = {}
+    # --- сколько распределили по дням ---
+    alloc_by_day: dict[str, float] = {}
     for (d, _a), v in agg.items():
         alloc_by_day[d] = alloc_by_day.get(d, 0.0) + float(v)
 
-    # добиваем OTHER, чтобы дневные суммы совпали
+    # --- добиваем OTHER, чтобы дневные суммы совпали ---
     for d, total in total_by_day.items():
         alloc = alloc_by_day.get(d, 0.0)
         diff = float(total) - float(alloc)
@@ -1174,8 +1272,8 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
             key = (d, "__OTHER_ADS__")
             agg[key] = agg.get(key, 0.0) + diff
 
-    # агрегируем по артикулу за период
-    by_article = {}
+    # --- агрегация по артикулу за период ---
+    by_article: dict[str, float] = {}
     for (_d, art), v in agg.items():
         by_article[art] = by_article.get(art, 0.0) + float(v)
 
@@ -1185,13 +1283,28 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
     out["by_article"] = by_article
     out["total"] = total
     out["other"] = other
+
+    # note (коротко)
+    notes = []
+    if failed_campaigns:
+        notes.append(f"⚠️ Кампаний с ошибками objects: {failed_campaigns} (их расход ушёл в __OTHER_ADS__).")
+    if no_mapping_campaigns:
+        notes.append(f"⚠️ Кампаний без сопоставления SKU→Артикул: {no_mapping_campaigns} (ушло в __OTHER_ADS__).")
+    out["note"] = " ".join(notes)
+
     out["debug"] = {
+        "period": f"{date_from_str}..{date_to_str}",
         "daily_rows_with_spend": int(len(daily_rows)),
         "campaigns_cached": int(len(camp2skus)),
         "sku2art_size": int(len(sku2art)),
+        "failed_objects_campaigns": int(failed_campaigns),
+        "empty_objects_campaigns": int(empty_objects_campaigns),
+        "no_mapping_campaigns": int(no_mapping_campaigns),
+        "other_total": round(other, 2),
+        "total_allocated": round(total, 2),
+        "status_sample": dict(list(camp2status.items())[:15]),
     }
     return out
-
 
 def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd.DataFrame:
     """Распределяем рекламу по SKU-строкам, но так, чтобы сумма по одному артикулу сохранялась.
@@ -2427,7 +2540,10 @@ with tab3:
 
     # 3) Реклама: используем ТУ ЖЕ логику, что и в TAB1
     # (берём общий расход на рекламу из Performance summary и распределяем по выручке SKU)
-    ads_alloc_abc = load_ads_spend_by_article(d_from_abc, d_to_abc)
+    ads_alloc_abc = load_ads_spend_by_article(
+        d_from_abc.strftime("%Y-%m-%d"),
+        d_to_abc.strftime("%Y-%m-%d"),
+    )
     sold_abc = allocate_ads_by_article(sold_abc, ads_alloc_abc.get("by_article", {}))
 
     # 4) Опер. расходы распределяем пропорционально выручке SKU (как в TAB1)
