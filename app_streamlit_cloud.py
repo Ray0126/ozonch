@@ -1036,7 +1036,6 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
         return out
 
     base = "https://api-performance.ozon.ru/api/client"
-    RETRY_429_SLEEP = 30  # сек, если упёрлись в лимит 429
 
     def _get_token() -> str:
         r = requests.post(
@@ -1083,93 +1082,20 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
         return rows
 
     def _get_campaign_objects(token: str, campaign_id: str) -> list[str]:
-        """Возвращает список SKU (object.id) для кампании.
-
-        В облаке Streamlit часто встречаются:
-        - 429 (rate limit)
-        - 5xx (временные проблемы)
-        - 403/404 для отдельных кампаний (нет доступа/кампания архивная)
-
-        Мы НЕ должны падать всем приложением из-за одной кампании.
-        Поэтому: ретраи на 429/5xx, а на 403/404/прочее — логируем и возвращаем [].
-        """
-        url = f"{base}/campaign/{campaign_id}/objects"  # base defined above
-
-        max_attempts = 8
-        sleep_s = 1.5
-        last_err = None
-
-        for attempt in range(1, max_attempts + 1):
-            try:
-                r = requests.get(url, headers=headers(token), timeout=30)
-            except Exception as e:
-                last_err = f"request error: {e}"
-                time.sleep(min(sleep_s, 30))
-                sleep_s *= 1.7
+        url = f"{base}/campaign/{campaign_id}/objects"
+        while True:
+            r = requests.get(url, headers=_headers(token), timeout=30)
+            if r.status_code == 429:
+                time.sleep(30)
                 continue
-
-            sc = int(r.status_code)
-
-            # rate limit
-            if sc == 429:
-                time.sleep(max(RETRY_429_SLEEP, sleep_s))
-                sleep_s *= 1.7
-                last_err = f"429 rate limited"
-                continue
-
-            # transient server errors
-            if sc in (500, 502, 503, 504):
-                time.sleep(min(max(sleep_s, 2), 30))
-                sleep_s *= 1.7
-                last_err = f"{sc} server error"
-                continue
-
-            # auth / permission / not found — не валим весь расчёт
-            if sc in (401, 403, 404):
-                # 401 может быть из-за истёкшего токена — но токен живёт ~50 мин.
-                # Для простоты: помечаем как пропуск; дневной diff уйдёт в __OTHER_ADS__.
-                _ads_debug["skipped_campaigns"].append({
-                    "campaign_id": str(campaign_id),
-                    "status": sc,
-                    "body": (r.text or "")[:200],
-                })
-                return []
-
-            if sc != 200:
-                # любой другой код — тоже пропускаем
-                _ads_debug["skipped_campaigns"].append({
-                    "campaign_id": str(campaign_id),
-                    "status": sc,
-                    "body": (r.text or "")[:200],
-                })
-                return []
-
-            # 200
-            try:
-                data = r.json()
-            except Exception:
-                _ads_debug["skipped_campaigns"].append({
-                    "campaign_id": str(campaign_id),
-                    "status": sc,
-                    "body": (r.text or "")[:200],
-                })
-                return []
-
-            skus: list[str] = []
+            r.raise_for_status()
+            data = r.json()
+            skus = []
             if isinstance(data, dict) and isinstance(data.get("list"), list):
                 for item in data["list"]:
                     if isinstance(item, dict) and "id" in item:
                         skus.append(str(item["id"]).strip())
-
             return [s for s in skus if s]
-
-        # если всё равно не вышло
-        _ads_debug["skipped_campaigns"].append({
-            "campaign_id": str(campaign_id),
-            "status": "failed",
-            "body": str(last_err or "unknown")[:200],
-        })
-        return []
 
     # Маппинг SKU->Артикул из COGS (Supabase / локальный файл)
     cogs_local = load_cogs()
@@ -1188,41 +1114,14 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
     token = _get_token()
 
     # daily CSV (по всем кампаниям)
-    # ВАЖНО: у Performance API часто есть лимит периода (обычно 62 дня).
-    # Поэтому делаем чанки, чтобы не падать 400/HTTPError на больших диапазонах (например в ABC).
-    def _iter_chunks(d1, d2, max_days: int = 62):
-        cur = d1
-        while cur <= d2:
-            to = min(cur + timedelta(days=max_days - 1), d2)
-            yield cur, to
-            cur = to + timedelta(days=1)
-
-    d1 = datetime.strptime(date_from_str, "%Y-%m-%d").date()
-    d2 = datetime.strptime(date_to_str, "%Y-%m-%d").date()
-
-    daily_rows = []
-    for a, b in _iter_chunks(d1, d2, max_days=62):
-        a_s = a.strftime("%Y-%m-%d")
-        b_s = b.strftime("%Y-%m-%d")
-
-        # retry 429
-        while True:
-            r = requests.get(
-                f"{base}/statistics/daily",
-                headers=_headers(token),
-                params={"dateFrom": a_s, "dateTo": b_s},
-                timeout=120,
-            )
-            if r.status_code == 429:
-                time.sleep(RETRY_429_SLEEP)
-                continue
-            break
-
-        if r.status_code != 200:
-            # Дадим понятную причину, иначе Streamlit Cloud редактирует сообщение.
-            raise RuntimeError(f"ADS daily error {r.status_code} for {a_s}..{b_s}: {r.text[:800]}")
-
-        daily_rows.extend(_parse_daily(r.text))
+    r = requests.get(
+        f"{base}/statistics/daily",
+        headers=_headers(token),
+        params={"dateFrom": date_from_str, "dateTo": date_to_str},
+        timeout=120,
+    )
+    r.raise_for_status()
+    daily_rows = _parse_daily(r.text)
 
     # TOTAL по дням (как в кабинете)
     total_by_day = {}
@@ -2501,53 +2400,62 @@ with tab3:
         p.progress(i / len(selected_months), text=f"Загружаю операции… {i}/{len(selected_months)}")
     p.empty()
 
+    # ================== ABC: считаем "почти идеальную" прибыль как в TAB1 ==================
+    # Собираем все операции за выбранные месяцы
     df = pd.concat(dfs, ignore_index=True) if dfs else pd.DataFrame()
 
-    # === ABC: считаем прибыль по той же логике, что и в TAB1 (налог + реклама + opex + cogs) ===
+    # Период ABC (нужен для рекламы и оpex)
+    d_from_abc = None
+    d_to_abc = None
+    for (yy, mm) in selected_months:
+        a, b = month_start_end(yy, mm)
+        d_from_abc = a if d_from_abc is None else min(d_from_abc, a)
+        d_to_abc = b if d_to_abc is None else max(d_to_abc, b)
+    if d_from_abc is None or d_to_abc is None:
+        st.info("Не удалось определить период ABC.")
+        st.stop()
 
-    # соберём SoldSKU таблицу на весь выбранный период
-    sold_all = build_sold_sku_table(df, cogs_df)
-    if sold_all is None or sold_all.empty:
+    # 1) Берём ту же SKU-таблицу, что и в TAB1 (там уже есть комиссии/логистика/COGS/артикулы)
+    sold_abc = build_sold_sku_table(df, cogs_df)
+    if sold_abc is None or sold_abc.empty:
         st.info("Нет операций со SKU за выбранный период.")
         st.stop()
 
-    # границы периода ABC
-    d_from_abc = min(month_start_end(y, m)[0] for (y, m) in selected_months)
-    d_to_abc   = max(month_start_end(y, m)[1] for (y, m) in selected_months)
+    # 2) Налог 6% распределяем пропорционально выручке SKU (как в TAB1)
+    total_tax_abc = float(sold_abc["accruals_net"].sum()) * 0.06
+    sold_abc = allocate_tax_by_share(sold_abc, total_tax_abc)
 
-    # налог
-    total_tax = float(sold_all["accruals_net"].sum()) * 0.06
-    sold_view = allocate_tax_by_share(sold_all, total_tax)
+    # 3) Реклама: используем ТУ ЖЕ логику, что и в TAB1
+    # (берём общий расход на рекламу из Performance summary и распределяем по выручке SKU)
+    ads_abc = load_ads_summary(d_from_abc.strftime("%Y-%m-%d"), d_to_abc.strftime("%Y-%m-%d"))
+    ads_spent_abc = float((ads_abc or {}).get("spent", 0.0) or 0.0)
+    sold_abc = allocate_cost_by_share(sold_abc, ads_spent_abc, "ads_total")
 
-    # реклама по артикулам (из Performance daily + objects + сопоставление SKU->Артикул из COGS/Supabase)
-    ads_alloc = load_ads_spend_by_article(d_from_abc.strftime("%Y-%m-%d"), d_to_abc.strftime("%Y-%m-%d"))
-    sold_view = allocate_ads_by_article(sold_view, ads_alloc)
+    # 4) Опер. расходы распределяем пропорционально выручке SKU (как в TAB1)
+    opex_period_abc = opex_sum_period(df_opex, d_from_abc, d_to_abc)
+    sold_abc = allocate_cost_by_share(sold_abc, opex_period_abc, "opex_total")
 
-    # OPEX распределяем пропорционально выручке
-    opex_abc = opex_sum_period(df_opex, d_from_abc, d_to_abc)
-    sold_view = allocate_cost_by_share(sold_view, opex_abc, "opex_total")
+    # 5) Финальная прибыль (та же формула, что и в TAB1)
+    sold_abc = compute_profitability(sold_abc)
 
-    # прибыль по полной формуле
-    sold_view = compute_profitability(sold_view)
+    # Приводим к формату, который дальше использует ABC (qty/accruals/profit)
+    g = sold_abc.rename(columns={
+        "qty_buyout": "buyout_qty",
+        "accruals_net": "accruals",
+    }).copy()
 
-    # агрегат для ABC
-    g = sold_view.rename(columns={"sku": "SKU", "name": "name"}).copy()
-    g["sku"] = pd.to_numeric(g.get("SKU"), errors="coerce").astype("Int64")
-    g = g.dropna(subset=["sku"]).copy()
-    g["sku"] = g["sku"].astype(int)
-
-    g = g.rename(columns={"sku": "sku"})
-    g["buyout_qty"] = pd.to_numeric(g.get("qty_buyout", 0), errors="coerce").fillna(0).astype(int)
-    g["accruals"] = pd.to_numeric(g.get("accruals_net", 0.0), errors="coerce").fillna(0.0)
+    # страховка типов
+    g["buyout_qty"] = pd.to_numeric(g.get("buyout_qty", 0), errors="coerce").fillna(0).astype(int)
+    g["accruals"] = pd.to_numeric(g.get("accruals", 0.0), errors="coerce").fillna(0.0)
     g["profit"] = pd.to_numeric(g.get("profit", 0.0), errors="coerce").fillna(0.0)
 
-    # артикул
+    # в TAB3 ниже используется name, sku, article
+    if "name" not in g.columns:
+        g["name"] = ""
     if "article" not in g.columns:
         g["article"] = ""
     g["article"] = g["article"].fillna("").astype(str)
 
-    # оставим только нужные колонки для ABC ниже
-    g = g[["sku", "article", "name", "buyout_qty", "accruals", "profit"]].copy()
     if only_profit:
         g = g[g["profit"] > 0].copy()
 
