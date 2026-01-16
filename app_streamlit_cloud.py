@@ -1093,7 +1093,7 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
         Мы НЕ должны падать всем приложением из-за одной кампании.
         Поэтому: ретраи на 429/5xx, а на 403/404/прочее — логируем и возвращаем [].
         """
-        url = f"{BASE}/campaign/{campaign_id}/objects"
+        url = f"{base}/campaign/{campaign_id}/objects"  # base defined above
 
         max_attempts = 8
         sleep_s = 1.5
