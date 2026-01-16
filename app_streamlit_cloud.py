@@ -1083,20 +1083,93 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
         return rows
 
     def _get_campaign_objects(token: str, campaign_id: str) -> list[str]:
-        url = f"{base}/campaign/{campaign_id}/objects"
-        while True:
-            r = requests.get(url, headers=_headers(token), timeout=30)
-            if r.status_code == 429:
-                time.sleep(30)
+        """Возвращает список SKU (object.id) для кампании.
+
+        В облаке Streamlit часто встречаются:
+        - 429 (rate limit)
+        - 5xx (временные проблемы)
+        - 403/404 для отдельных кампаний (нет доступа/кампания архивная)
+
+        Мы НЕ должны падать всем приложением из-за одной кампании.
+        Поэтому: ретраи на 429/5xx, а на 403/404/прочее — логируем и возвращаем [].
+        """
+        url = f"{BASE}/campaign/{campaign_id}/objects"
+
+        max_attempts = 8
+        sleep_s = 1.5
+        last_err = None
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                r = requests.get(url, headers=headers(token), timeout=30)
+            except Exception as e:
+                last_err = f"request error: {e}"
+                time.sleep(min(sleep_s, 30))
+                sleep_s *= 1.7
                 continue
-            r.raise_for_status()
-            data = r.json()
-            skus = []
+
+            sc = int(r.status_code)
+
+            # rate limit
+            if sc == 429:
+                time.sleep(max(RETRY_429_SLEEP, sleep_s))
+                sleep_s *= 1.7
+                last_err = f"429 rate limited"
+                continue
+
+            # transient server errors
+            if sc in (500, 502, 503, 504):
+                time.sleep(min(max(sleep_s, 2), 30))
+                sleep_s *= 1.7
+                last_err = f"{sc} server error"
+                continue
+
+            # auth / permission / not found — не валим весь расчёт
+            if sc in (401, 403, 404):
+                # 401 может быть из-за истёкшего токена — но токен живёт ~50 мин.
+                # Для простоты: помечаем как пропуск; дневной diff уйдёт в __OTHER_ADS__.
+                _ads_debug["skipped_campaigns"].append({
+                    "campaign_id": str(campaign_id),
+                    "status": sc,
+                    "body": (r.text or "")[:200],
+                })
+                return []
+
+            if sc != 200:
+                # любой другой код — тоже пропускаем
+                _ads_debug["skipped_campaigns"].append({
+                    "campaign_id": str(campaign_id),
+                    "status": sc,
+                    "body": (r.text or "")[:200],
+                })
+                return []
+
+            # 200
+            try:
+                data = r.json()
+            except Exception:
+                _ads_debug["skipped_campaigns"].append({
+                    "campaign_id": str(campaign_id),
+                    "status": sc,
+                    "body": (r.text or "")[:200],
+                })
+                return []
+
+            skus: list[str] = []
             if isinstance(data, dict) and isinstance(data.get("list"), list):
                 for item in data["list"]:
                     if isinstance(item, dict) and "id" in item:
                         skus.append(str(item["id"]).strip())
+
             return [s for s in skus if s]
+
+        # если всё равно не вышло
+        _ads_debug["skipped_campaigns"].append({
+            "campaign_id": str(campaign_id),
+            "status": "failed",
+            "body": str(last_err or "unknown")[:200],
+        })
+        return []
 
     # Маппинг SKU->Артикул из COGS (Supabase / локальный файл)
     cogs_local = load_cogs()
