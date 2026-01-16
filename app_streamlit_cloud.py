@@ -2427,9 +2427,8 @@ with tab3:
 
     # 3) Реклама: используем ТУ ЖЕ логику, что и в TAB1
     # (берём общий расход на рекламу из Performance summary и распределяем по выручке SKU)
-    ads_abc = load_ads_summary(d_from_abc.strftime("%Y-%m-%d"), d_to_abc.strftime("%Y-%m-%d"))
-    ads_spent_abc = float((ads_abc or {}).get("spent", 0.0) or 0.0)
-    sold_abc = allocate_cost_by_share(sold_abc, ads_spent_abc, "ads_total")
+    ads_alloc_abc = load_ads_spend_by_article(d_from_abc, d_to_abc)
+    sold_abc = allocate_ads_by_article(sold_abc, ads_alloc_abc.get("by_article", {}))
 
     # 4) Опер. расходы распределяем пропорционально выручке SKU (как в TAB1)
     opex_period_abc = opex_sum_period(df_opex, d_from_abc, d_to_abc)
