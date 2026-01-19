@@ -8,7 +8,7 @@ import pandas as pd
 
 # Optional: custom lightweight table component with drag&drop columns
 try:
-    from ozon_table_component import tanstack_table
+    from ozon_table_component.component import ozon_table as tanstack_table
 except Exception:
     tanstack_table = None
 from datetime import date, timedelta, datetime
