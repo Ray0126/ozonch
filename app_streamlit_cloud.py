@@ -742,41 +742,6 @@ def save_opex_types(types: list[str]):
 def ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
-# ================== UI PREFS (columns / filters) ==================
-UI_PREFS_PATH = os.path.join(DATA_DIR, "ui_prefs.json")
-
-def _prefs_load() -> dict:
-    """Локальные настройки интерфейса.
-    В Streamlit Cloud файл может сбрасываться при деплое, но между перезапусками рантайма обычно живёт.
-    """
-    ensure_data_dir()
-    if os.path.exists(UI_PREFS_PATH):
-        try:
-            with open(UI_PREFS_PATH, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            return data if isinstance(data, dict) else {}
-        except Exception:
-            return {}
-    return {}
-
-def _prefs_save(prefs: dict) -> None:
-    ensure_data_dir()
-    try:
-        with open(UI_PREFS_PATH, "w", encoding="utf-8") as f:
-            json.dump(prefs or {}, f, ensure_ascii=False, indent=2)
-    except Exception:
-        # если файловая система read-only — просто игнор
-        pass
-
-def _prefs_get(key: str, default=None):
-    prefs = _prefs_load()
-    return prefs.get(key, default)
-
-def _prefs_set(key: str, value) -> None:
-    prefs = _prefs_load()
-    prefs[key] = value
-    _prefs_save(prefs)
-
 # ================== COGS ==================
 def normalize_cogs_upload(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -1892,33 +1857,6 @@ with tab1:
         # прибыльные метрики по новым формулам
         sold_view = compute_profitability(sold_view)
 
-        # дополнительные метрики как в юнит-экономике/для удобства
-        try:
-            sold_view["buyout_pct"] = (
-                pd.to_numeric(sold_view["qty_buyout"], errors="coerce").fillna(0.0)
-                / pd.to_numeric(sold_view["qty_orders"], errors="coerce").replace(0, pd.NA)
-                * 100.0
-            ).fillna(0.0)
-        except Exception:
-            sold_view["buyout_pct"] = 0.0
-
-        try:
-            sold_view["avg_price"] = (
-                pd.to_numeric(sold_view["accruals_net"], errors="coerce").fillna(0.0)
-                / pd.to_numeric(sold_view["qty_buyout"], errors="coerce").replace(0, pd.NA)
-            ).fillna(0.0)
-        except Exception:
-            sold_view["avg_price"] = 0.0
-
-        try:
-            sold_view["drr_pct"] = (
-                pd.to_numeric(sold_view.get("ads_total", 0.0), errors="coerce").fillna(0.0)
-                / pd.to_numeric(sold_view["accruals_net"], errors="coerce").replace(0, pd.NA)
-                * 100.0
-            ).fillna(0.0)
-        except Exception:
-            sold_view["drr_pct"] = 0.0
-
         show = sold_view.copy()
         show = show.rename(columns={
             "article": "Артикул",
@@ -1940,16 +1878,13 @@ with tab1:
             "profit_per_unit": "Прибыль на 1 шт, ₽",
             "margin_%": "Маржинальность, %",
             "roi_%": "ROI, %",
-            "buyout_pct": "% выкупа",
-            "avg_price": "Средняя цена продажи, ₽",
-            "drr_pct": "DRR, %",
         })
 
         # порядок колонок
         cols = [
             "Артикул","SKU","Название",
-            "Заказы, шт","Возвраты, шт","Выкуп, шт","% выкупа",
-            "Выручка, ₽","Средняя цена продажи, ₽","DRR, %",
+            "Заказы, шт","Возвраты, шт","Выкуп, шт",
+            "Выручка, ₽",
             "Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽",
             "Реклама, ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽",
@@ -1961,6 +1896,20 @@ with tab1:
             if c not in show.columns:
                 show[c] = 0.0
         show = show[cols].copy()
+
+
+        # Доп. метрики (как ты просил)
+        try:
+            orders = pd.to_numeric(show.get("Заказы, шт."), errors="coerce").fillna(0.0)
+            buyout = pd.to_numeric(show.get("Выкуп, шт."), errors="coerce").fillna(0.0)
+            rev = pd.to_numeric(show.get("Выручка, ₽"), errors="coerce").fillna(0.0)
+            ads = pd.to_numeric(show.get("Реклама, ₽"), errors="coerce").fillna(0.0)
+
+            show["% выкупа"] = (buyout / orders.where(orders != 0) * 100).fillna(0.0)
+            show["Средняя цена продажи"] = (rev / buyout.where(buyout != 0)).fillna(0.0)
+            show["ДРР, %"] = (ads / rev.where(rev != 0) * 100).fillna(0.0)
+        except Exception:
+            pass
         show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
         # Сортировка должна работать корректно => оставляем числовые типы
         # Числа приводим, но НЕ форматируем в строки
@@ -1969,301 +1918,45 @@ with tab1:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0).astype(int)
 
         money_cols = [
-            "Выручка, ₽","Средняя цена продажи, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
+            "Выручка, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽",
         ]
         for c in money_cols:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
-        pct_cols = ["% выкупа", "DRR, %", "Маржинальность, %","ROI, %"]
+        pct_cols = ["Маржинальность, %","ROI, %"]
         for c in pct_cols:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
-        # --- Гибрид: лёгкие фильтры + простая настройка колонок + (опционально) интерактивная таблица ---
-        prefs = _prefs_load()
-        
-        pref_key = "soldsku_table_v2"
-        cfg = prefs.get(pref_key, {}) if isinstance(prefs.get(pref_key, {}), dict) else {}
-        saved_visible = cfg.get("visible", []) if isinstance(cfg.get("visible", []), list) else []
-        saved_order = cfg.get("order", []) if isinstance(cfg.get("order", []), list) else []
-        saved_mode = str(cfg.get("mode", "Лёгкая"))
-
-        # дефолт
-        default_visible = cols[:]
-        default_order = cols[:]
-
-        # восстанавливаем (только существующие колонки)
-        visible_cols = [c for c in (saved_visible or default_visible) if c in cols]
-        if not visible_cols:
-            visible_cols = default_visible[:]
-        order_cols = [c for c in (saved_order or default_order) if c in cols]
-        # добавляем новые, если появились
-        order_cols = order_cols + [c for c in cols if c not in order_cols]
-        
-        # быстрые фильтры
-        with st.expander("Фильтры (быстро)", expanded=False):
-            f1, f2, f3, f4 = st.columns([2.2, 1.2, 1.2, 1.2])
-            with f1:
-                q = st.text_input("Поиск (артикул / SKU / название)", value=str(cfg.get("q", "")), key="soldsku_q")
-            with f2:
-                min_rev = st.number_input("Мин. выручка, ₽", min_value=0.0, value=float(cfg.get("min_rev", 0.0) or 0.0), step=100.0, key="soldsku_min_rev")
-            with f3:
-                min_profit = st.number_input("Мин. прибыль, ₽", value=float(cfg.get("min_profit", 0.0) or 0.0), step=100.0, key="soldsku_min_profit")
-            with f4:
-                only_pos = st.checkbox("Только прибыльные", value=bool(cfg.get("only_pos", False)), key="soldsku_only_pos")
-
-            if st.button("Сохранить фильтры", use_container_width=False, key="soldsku_save_filters"):
-                prefs = _prefs_load()
-                cfg2 = prefs.get(pref_key, {}) if isinstance(prefs.get(pref_key, {}), dict) else {}
-                cfg2.update({"q": q, "min_rev": float(min_rev), "min_profit": float(min_profit), "only_pos": bool(only_pos)})
-                prefs[pref_key] = cfg2
-                _prefs_save(prefs)
-                st.success("Фильтры сохранены")
-
-        show2 = show.copy()
+        # Таблица в "лёгком" стиле, но с drag&drop колонок + встроенными фильтрами/сортировкой.
+        # Требование: st-aggrid (добавь в requirements.txt: st-aggrid)
         try:
-            if q:
-                qq = str(q).strip().lower()
-                mask = (
-                    show2["Артикул"].astype(str).str.lower().str.contains(qq, na=False)
-                    | show2["SKU"].astype(str).str.lower().str.contains(qq, na=False)
-                    | show2["Название"].astype(str).str.lower().str.contains(qq, na=False)
-                )
-                show2 = show2[mask].copy()
-        except Exception:
-            pass
-        try:
-            show2 = show2[show2["Выручка, ₽"] >= float(min_rev)].copy()
-        except Exception:
-            pass
-        try:
-            show2 = show2[show2["Прибыль, ₽"] >= float(min_profit)].copy()
-        except Exception:
-            pass
-        if only_pos:
-            try:
-                show2 = show2[show2["Прибыль, ₽"] > 0].copy()
-            except Exception:
-                pass
+            from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
 
-        # настройка колонок / режим отображения
-        st.markdown("#### Настройки таблицы")
-        left, right = st.columns([1.2, 1.0])
-        with left:
-            mode_now = st.radio(
-                "Вид таблицы",
-                options=["Лёгкая", "Грид"],
-                index=0 if saved_mode == "Лёгкая" else 1,
-                horizontal=True,
-                key="soldsku_mode",
-                label_visibility="collapsed",
+            gb = GridOptionsBuilder.from_dataframe(show)
+            gb.configure_default_column(resizable=True, sortable=True, filter=True)
+            gb.configure_grid_options(
+                suppressDragLeaveHidesColumns=True,
+                suppressFieldDotNotation=True,
             )
-        with right:
-            cbtn1, cbtn2 = st.columns(2)
-            with cbtn1:
-                if st.button("↩️ Сбросить", use_container_width=True, key="soldsku_reset_v3"):
-                    prefs = _prefs_load()
-                    prefs.pop(pref_key, None)
-                    _prefs_save(prefs)
-                    st.success("Сброшено")
-                    st.rerun()
-            with cbtn2:
-                # в "Лёгкой" сохраняем только быстрые фильтры;
-                # в "Грид" — ещё и состояние колонок/фильтров/сортировки из AgGrid
-                if st.button("💾 Сохранить", use_container_width=True, key="soldsku_save_v3"):
-                    prefs = _prefs_load()
-                    cfg2 = prefs.get(pref_key, {}) if isinstance(prefs.get(pref_key, {}), dict) else {}
-                    cfg2.update({
-                        "mode": mode_now,
-                        "q": q,
-                        "min_rev": float(min_rev),
-                        "min_profit": float(min_profit),
-                        "only_pos": bool(only_pos),
-                    })
-                    # если мы в гриде — подтянем состояние из session_state
-                    grid_state = st.session_state.get("soldsku_grid_state")
-                    if isinstance(grid_state, dict):
-                        cfg2["grid_state"] = grid_state
-                    prefs[pref_key] = cfg2
-                    _prefs_save(prefs)
-                    st.success("Сохранено")
-                    st.rerun()
+            grid_options = gb.build()
 
-        st.caption("Лёгкая — красивый вид как раньше. Грид — Excel-режим: перетаскивание колонок, встроенные фильтры в заголовках, изменение ширины.")
-
-        # --------------------
-        # ГРИД: даём пользователю drag&drop колонок и встроенные фильтры
-        # --------------------
-        if mode_now == "Грид":
-            try:
-                from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode  # type: ignore
-
-                # готовим dataframe для грида: округлим, чтобы не было "бесконечных" дробей
-                show_grid = show2.copy()
-                for c in show_grid.columns:
-                    if c in int_cols and c in show_grid.columns:
-                        show_grid[c] = pd.to_numeric(show_grid[c], errors="coerce").fillna(0).astype(int)
-                    elif c in (percent_cols | ratio_cols) and c in show_grid.columns:
-                        show_grid[c] = pd.to_numeric(show_grid[c], errors="coerce")
-                        show_grid[c] = show_grid[c].round(2)
-                    elif c in money_cols and c in show_grid.columns:
-                        show_grid[c] = pd.to_numeric(show_grid[c], errors="coerce")
-                        show_grid[c] = show_grid[c].round(2)
-
-                gb = GridOptionsBuilder.from_dataframe(show_grid)
-                gb.configure_default_column(
-                    sortable=True,
-                    filter=True,
-                    resizable=True,
-                    minWidth=110,
-                    wrapText=False,
-                    autoHeight=False,
-                )
-
-                # nicer defaults
-                gb.configure_grid_options(
-                    enableRangeSelection=True,
-                    suppressDragLeaveHidesColumns=False,
-                    rowSelection="multiple",
-                    headerHeight=36,
-                )
-
-                # восстанавливаем сохранённое состояние грида (порядок/скрытие/фильтры/сортировки)
-                saved_state = saved_cfg.get("grid_state") if isinstance(saved_cfg, dict) else None
-                grid_opts = gb.build()
-                if isinstance(saved_state, dict):
-                    # streamlit-aggrid умеет принять эти куски через gridOptions
-                    # (они игнорируются, если формат отличается — тогда просто стартуем "с нуля")
-                    grid_opts["columnState"] = saved_state.get("columnState")
-                    grid_opts["filterModel"] = saved_state.get("filterModel")
-                    grid_opts["sortModel"] = saved_state.get("sortModel")
-
-                resp = AgGrid(
-                    show_grid,
-                    gridOptions=grid_opts,
-                    update_mode=GridUpdateMode.MODEL_CHANGED | GridUpdateMode.COLUMN_MOVED | GridUpdateMode.FILTERING_CHANGED | GridUpdateMode.SORTING_CHANGED,
-                    data_return_mode=DataReturnMode.AS_INPUT,
-                    height=560,
-                    fit_columns_on_grid_load=False,
-                    enable_enterprise_modules=False,
-                    theme="balham",
-                    key="soldsku_grid",
-                )
-
-                # сохраняем состояние в session_state (кнопка "Сохранить" выше это подхватит)
-                # у разных версий st-aggrid ключи могут отличаться — берём то, что есть
-                state = {}
-                if isinstance(resp, dict):
-                    for k_src, k_dst in [("column_state", "columnState"), ("filter_model", "filterModel"), ("sort_model", "sortModel")]:
-                        if k_src in resp and resp[k_src] is not None:
-                            state[k_dst] = resp[k_src]
-                    # иногда ответ лежит в resp["gridState"]
-                    if not state and isinstance(resp.get("gridState"), dict):
-                        gs = resp["gridState"]
-                        state = {
-                            "columnState": gs.get("columnState"),
-                            "filterModel": gs.get("filterModel"),
-                            "sortModel": gs.get("sortModel"),
-                        }
-                if state:
-                    st.session_state["soldsku_grid_state"] = state
-
-                # IMPORTANT: для экспорта/дальнейших расчётов берём исходный show2
-                # (AgGrid может возвращать изменённые типы).
-
-            except Exception as e:
-                st.warning(f"Режим 'Грид' недоступен или не смог загрузиться: {e}. Показываю 'Лёгкую'.")
-                mode_now = "Лёгкая"
-
-        # --------------------
-        # ЛЁГКАЯ: чистый st.dataframe
-        # --------------------
-        if mode_now == "Лёгкая":
-            st.dataframe(
-                show2,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
-                    "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
-                    "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
-                    **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols if c in show2.columns},
-                    "% выкупа": st.column_config.NumberColumn(format="%.1f"),
-                    "DRR, %": st.column_config.NumberColumn(format="%.1f"),
-                    "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
-                    "ROI, %": st.column_config.NumberColumn(format="%.1f"),
-                }
+            AgGrid(
+                show,
+                gridOptions=grid_options,
+                theme="balham",
+                height=520,
+                update_mode=GridUpdateMode.NO_UPDATE,
+                data_return_mode=DataReturnMode.AS_INPUT,
+                fit_columns_on_grid_load=False,
+                allow_unsafe_jscode=False,
+                key="soldsku_grid",
             )
-
-        # для экспорта лучше сохранять то, что видишь
-        show = show2
-# применяем порядок/видимость
-        visible_sel = [c for c in (st.session_state.get("soldsku_visible_sel") or visible_cols) if c in cols]
-        order_sel = [c for c in (st.session_state.get("soldsku_order_sel") or order_cols) if c in cols]
-        order_sel = order_sel + [c for c in cols if c not in order_sel]
-
-        # обязательные колонки
-        for must in ["Артикул", "SKU", "Название"]:
-            if must not in visible_sel and must in cols:
-                visible_sel = [must] + visible_sel
-        
-        final_cols = [c for c in order_sel if c in visible_sel]
-        if final_cols:
-            show2 = show2[final_cols].copy()
-
-        # рендер: лёгкая или грид
-        mode_now = st.session_state.get("soldsku_mode", saved_mode)
-        if mode_now == "Грид":
-            try:
-                from st_aggrid import AgGrid, GridOptionsBuilder  # type: ignore
-
-                gb = GridOptionsBuilder.from_dataframe(show2)
-                gb.configure_default_column(
-                    sortable=True,
-                    filter=True,
-                    resizable=True,
-                    minWidth=90,
-                )
-                gb.configure_grid_options(
-                    enableRangeSelection=True,
-                    suppressDragLeaveHidesColumns=False,
-                    rowSelection="multiple",
-                )
-                grid_opts = gb.build()
-
-                AgGrid(
-                    show2,
-                    gridOptions=grid_opts,
-                    height=520,
-                    fit_columns_on_grid_load=False,
-                    allow_unsafe_jscode=True,
-                    enable_enterprise_modules=False,
-                    theme="streamlit",
-                )
-            except Exception:
-                st.info("Режим 'Грид' недоступен (пакет streamlit-aggrid не установлен). Показываю обычную таблицу.")
-                mode_now = "Лёгкая"
-
-        if mode_now == "Лёгкая":
-            st.dataframe(
-                show2,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
-                    "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
-                    "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
-                    **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols if c in show2.columns},
-                    "% выкупа": st.column_config.NumberColumn(format="%.1f"),
-                    "DRR, %": st.column_config.NumberColumn(format="%.1f"),
-                    "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
-                    "ROI, %": st.column_config.NumberColumn(format="%.1f"),
-                }
-            )
-
-        # для экспорта лучше сохранять то, что видишь
-        show = show2
+            st.caption("Колонки можно перетаскивать мышкой прямо в заголовках (как в Excel). В заголовке есть меню сортировки/фильтра.")
+        except Exception:
+            st.dataframe(show, use_container_width=True, hide_index=True)
+            st.caption("Чтобы включить перетаскивание колонок и встроенные фильтры, поставь пакет st-aggrid.")
 
         st.download_button(
             "Скачать XLSX (таблица проданных SKU)",
