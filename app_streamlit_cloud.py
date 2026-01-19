@@ -60,7 +60,65 @@ if not st.session_state.auth_ok:
 BASE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(BASE_DIR / "src"))
 
-from ozon_client import OzonSellerClient, last_closed_month
+from ozon_client import OzonSellerClient, last_closed_month, OzonAPIError
+
+# ================== FRIENDLY API ERROR UI ==================
+
+def _humanize_ozon_error(exc: Exception) -> tuple[str, str]:
+    """Возвращает (заголовок, детали) для отображения в UI."""
+    if isinstance(exc, OzonAPIError):
+        sc = exc.status_code
+        # типовые причины
+        if sc in (401, 403):
+            title = "Ozon API: нет доступа (401/403)"
+            details = (
+                f"Запрос: {exc.path}\n"
+                "Проверь Client-Id / Api-Key (Streamlit secrets) и доступы ключа.\n\n"
+                f"Ответ: {exc.body}"
+            )
+            return title, details
+        if sc == 429:
+            title = "Ozon API: лимит запросов (429)"
+            details = (
+                f"Запрос: {exc.path}\n"
+                "Ozon вернул ограничение по частоте. Подожди 30–60 секунд и нажми «Повторить».\n\n"
+                f"Ответ: {exc.body}"
+            )
+            return title, details
+        if sc >= 500:
+            title = "Ozon API: временная ошибка сервера (5xx)"
+            details = f"Запрос: {exc.path}\n\nОтвет: {exc.body}"
+            return title, details
+        return f"Ozon API error ({sc})", f"Запрос: {exc.path}\n\nОтвет: {exc.body}"
+
+    # прочие ошибки сети/таймауты
+    if isinstance(exc, requests.exceptions.Timeout):
+        return "Ozon API: таймаут", str(exc)
+    if isinstance(exc, requests.exceptions.RequestException):
+        return "Ozon API: ошибка сети", str(exc)
+    return "Ошибка", str(exc)
+
+
+def _block_with_retry(title: str, details: str, cache_clear_fn=None):
+    """Показывает сообщение и останавливает приложение без красного падения."""
+    st.error(title)
+    with st.expander("Детали", expanded=False):
+        st.code(details)
+
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        if st.button("Повторить", use_container_width=True):
+            try:
+                if cache_clear_fn is not None:
+                    cache_clear_fn()
+                else:
+                    st.cache_data.clear()
+            finally:
+                st.rerun()
+    with c2:
+        st.caption("Если ошибка повторяется — проверь ключи Ozon API в secrets и лимиты API.")
+
+    st.stop()
 
 
 # ================== CONFIG ==================
@@ -988,15 +1046,19 @@ def month_safe_chunks(d_from: date, d_to: date):
         cur = chunk_to + timedelta(days=1)
 
 @st.cache_data(ttl=600)
-def load_ops_range(date_from_str: str, date_to_str: str) -> list[dict]:
+def load_ops_range(date_from_str: str, date_to_str: str) -> tuple[list[dict], str, str]:
     d1 = datetime.strptime(date_from_str, "%Y-%m-%d").date()
     d2 = datetime.strptime(date_to_str, "%Y-%m-%d").date()
 
     ops_all = []
-    for a, b in month_safe_chunks(d1, d2):
-        ops_part = client.fetch_finance_transactions(a.strftime("%Y-%m-%d"), b.strftime("%Y-%m-%d"))
-        ops_all.extend(ops_part)
-    return ops_all
+    try:
+        for a, b in month_safe_chunks(d1, d2):
+            ops_part = client.fetch_finance_transactions(a.strftime("%Y-%m-%d"), b.strftime("%Y-%m-%d"))
+            ops_all.extend(ops_part)
+        return ops_all, "", ""
+    except Exception as e:
+        title, details = _humanize_ozon_error(e)
+        return [], title, details
 
 @st.cache_data(ttl=600)
 def load_ads_summary(date_from_str: str, date_to_str: str) -> dict:
@@ -1624,12 +1686,16 @@ with tab1:
     prev_from = prev_to - timedelta(days=days_len - 1)
     st.caption(f"Сравнение: предыдущий период {prev_from.strftime('%Y-%m-%d')} — {prev_to.strftime('%Y-%m-%d')}")
 
-    ops_now = load_ops_range(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+    ops_now, ops_err_title, ops_err_details = load_ops_range(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+    if ops_err_title:
+        _block_with_retry(ops_err_title, ops_err_details, cache_clear_fn=load_ops_range.clear)
     df_ops = ops_to_df(ops_now)
 
     df_ops_prev = pd.DataFrame(columns=df_ops.columns)
     if prev_from <= prev_to:
-        ops_prev = load_ops_range(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+        ops_prev, ops_prev_err_title, ops_prev_err_details = load_ops_range(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+        if ops_prev_err_title:
+            _block_with_retry(ops_prev_err_title, ops_prev_err_details, cache_clear_fn=load_ops_range.clear)
         df_ops_prev = ops_to_df(ops_prev)
 
     sold = build_sold_sku_table(df_ops, cogs_df)
@@ -2265,13 +2331,19 @@ with tab2:
     @st.cache_data(ttl=3600)
     def load_ops_month(year: int, month: int):
         d1, d2 = month_start_end(year, month)
-        return client.fetch_finance_transactions(d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d"))
+        try:
+            return client.fetch_finance_transactions(d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d")), "", ""
+        except Exception as e:
+            title, details = _humanize_ozon_error(e)
+            return [], title, details
 
     month_rows = []
     progress = st.progress(0, text="Считаю месяцы…")
     for i, ym in enumerate(months, start=1):
         y, mo = map(int, ym.split("-"))
-        ops_m = load_ops_month(y, mo)
+        ops_m, ops_m_err_title, ops_m_err_details = load_ops_month(y, mo)
+        if ops_m_err_title:
+            _block_with_retry(ops_m_err_title, ops_m_err_details, cache_clear_fn=load_ops_month.clear)
         df_ops_m = ops_to_df(ops_m)
         met = month_metrics(df_ops_m)
         # Опер. расходы за месяц (из таба "Опер. расходы")
@@ -2428,7 +2500,11 @@ with tab3:
     @st.cache_data(ttl=3600)
     def load_ops_month_abc(y: int, m: int):
         d1, d2 = month_start_end(y, m)
-        return client.fetch_finance_transactions(d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d"))
+        try:
+            return client.fetch_finance_transactions(d1.strftime("%Y-%m-%d"), d2.strftime("%Y-%m-%d")), "", ""
+        except Exception as e:
+            title, details = _humanize_ozon_error(e)
+            return [], title, details
 
     closed = closed_months_until_today()
     closed_set = set(closed)
@@ -2509,7 +2585,10 @@ with tab3:
     dfs = []
     p = st.progress(0, text="Загружаю операции по месяцам…")
     for i, (yy, mm) in enumerate(selected_months, 1):
-        dfs.append(ops_to_df(load_ops_month_abc(yy, mm)))
+        _ops_m, _err_t, _err_d = load_ops_month_abc(yy, mm)
+        if _err_t:
+            _block_with_retry(_err_t, _err_d, cache_clear_fn=load_ops_month_abc.clear)
+        dfs.append(ops_to_df(_ops_m))
         p.progress(i / len(selected_months), text=f"Загружаю операции… {i}/{len(selected_months)}")
     p.empty()
 
