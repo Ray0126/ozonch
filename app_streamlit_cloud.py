@@ -7,10 +7,13 @@ import streamlit as st
 import pandas as pd
 
 # Optional: custom lightweight table component with drag&drop columns
+import traceback
 try:
-    from ozon_table_component import ozon_table as tanstack_table
-except Exception:
+    from ozon_table_component.component import ozon_table as tanstack_table
+except Exception as e:
     tanstack_table = None
+    st.error("❌ TanStack component import failed")
+    st.code(traceback.format_exc())
 from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
 import sys
