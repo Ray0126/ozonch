@@ -1937,6 +1937,7 @@ with tab1:
             left, right = st.columns([1, 1])
             with left:
                 if st.button("💾 Сохранить вид таблицы", use_container_width=True):
+                    # сохраняем текущее состояние (оно обновляется ниже после рендера)
                     st.session_state[view_key] = st.session_state.get(view_key, default_view)
                     st.success("Вид таблицы сохранён")
             with right:
@@ -1944,15 +1945,23 @@ with tab1:
                     st.session_state[view_key] = {}
                     st.info("Вид таблицы сброшен")
 
-            new_state = tanstack_table(
-                show,
-                key="soldsku_table",
-                default_view=st.session_state.get(view_key, {}),
-                height=520,
-            )
-            # Компонент возвращает состояние (колонки/фильтры/сортировка). Сохраняем автоматически.
-            if isinstance(new_state, dict) and new_state:
-                st.session_state[view_key] = new_state
+            data_records = show.to_dict(orient="records")
+            cols = list(show.columns)
+            try:
+                new_state = tanstack_table(
+                    data=data_records,
+                    columns=cols,
+                    state=st.session_state.get(view_key, {}),
+                    key="soldsku_table",
+                    height=520,
+                )
+                # Компонент возвращает состояние (колонки/фильтры/поиск).
+                if isinstance(new_state, dict) and new_state:
+                    st.session_state[view_key] = new_state
+            except Exception as e:
+                st.warning("Не удалось загрузить лёгкую таблицу с drag&drop. Показываю стандартную таблицу.")
+                st.caption(str(e))
+                st.dataframe(show, use_container_width=True, hide_index=True)
 
         else:
             st.dataframe(
