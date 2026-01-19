@@ -1,261 +1,143 @@
-/* Minimal Streamlit component without npm deps.
-   Supports:
-   - drag&drop column order
-   - per-column hide
-   - simple column filters row toggle
-   - sort on header click
-   - returns view state to Streamlit (columnOrder, hidden, filters, sort)
-*/
+/* global Streamlit, Tabulator */
 
-let ARGS = null;
-let STATE = {
-  columnOrder: [],
-  hidden: {},
-  filters: {},
-  sort: { id: null, desc: false },
-  showFilters: false,
-};
-
-const el = (id) => document.getElementById(id);
-
-function postToStreamlit(type, data) {
-  window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, "*");
+function getLSKey(tableId) {
+  return `ozon_table_component::${tableId}`;
 }
 
-function setFrameHeight() {
-  const h = document.documentElement.scrollHeight;
-  postToStreamlit("streamlit:setFrameHeight", { height: h });
+function safeParseJSON(s, fallback) {
+  try { return JSON.parse(s); } catch (e) { return fallback; }
 }
 
-function setValue(value) {
-  postToStreamlit("streamlit:setComponentValue", { value });
-}
+let table = null;
+let lastTableId = null;
 
-function normalizeColumns(cols, data) {
-  if (Array.isArray(cols) && cols.length) return cols;
-  const first = (data && data[0]) || {};
-  return Object.keys(first).map((k) => ({ id: k, header: k }));
-}
-
-function renderControls() {
-  el("btn-cols").onclick = () => {
-    const p = el("colsPanel");
-    p.style.display = p.style.display === "none" ? "block" : "none";
-    setFrameHeight();
-  };
-  el("btn-filters").onclick = () => {
-    STATE.showFilters = !STATE.showFilters;
-    render();
-    setFrameHeight();
-  };
-  el("btn-save").onclick = () => {
-    setValue({
-      columnOrder: STATE.columnOrder,
-      hidden: STATE.hidden,
-      filters: STATE.filters,
-      sort: STATE.sort,
-      showFilters: STATE.showFilters,
-    });
-  };
-  el("btn-reset").onclick = () => {
-    // reset to defaults
-    const cols = normalizeColumns(ARGS.columns, ARGS.data);
-    STATE.columnOrder = cols.map((c) => c.id);
-    STATE.hidden = {};
-    STATE.filters = {};
-    STATE.sort = { id: null, desc: false };
-    STATE.showFilters = false;
-    setValue({ __reset__: true });
-    render();
-    setFrameHeight();
-  };
-}
-
-function buildColsPanel(cols) {
-  const box = el("colsPanel");
-  box.innerHTML = "";
-  cols.forEach((c) => {
-    const row = document.createElement("label");
-    row.style.display = "flex";
-    row.style.alignItems = "center";
-    row.style.gap = "8px";
-    row.style.fontSize = "12px";
-    row.style.margin = "2px 0";
-    const cb = document.createElement("input");
-    cb.type = "checkbox";
-    cb.checked = !STATE.hidden[c.id];
-    cb.onchange = () => {
-      STATE.hidden[c.id] = !cb.checked;
-      render();
-      setFrameHeight();
-    };
-    const sp = document.createElement("span");
-    sp.textContent = c.header || c.id;
-    row.appendChild(cb);
-    row.appendChild(sp);
-    box.appendChild(row);
-  });
-}
-
-function applyFilters(data, colsInOrder) {
-  let out = data;
-  for (const c of colsInOrder) {
-    if (STATE.hidden[c.id]) continue;
-    const fv = (STATE.filters[c.id] || "").toString().trim().toLowerCase();
-    if (!fv) continue;
-    out = out.filter((row) => {
-      const v = (row[c.id] ?? "").toString().toLowerCase();
-      return v.includes(fv);
-    });
-  }
-  return out;
-}
-
-function applySort(data) {
-  const { id, desc } = STATE.sort || {};
-  if (!id) return data;
-  const out = [...data];
-  out.sort((a, b) => {
-    const va = a[id];
-    const vb = b[id];
-    const na = Number(String(va).replace(/\s/g, "").replace(",", "."));
-    const nb = Number(String(vb).replace(/\s/g, "").replace(",", "."));
-    const bothNum = Number.isFinite(na) && Number.isFinite(nb);
-    let cmp = 0;
-    if (bothNum) cmp = na - nb;
-    else cmp = String(va ?? "").localeCompare(String(vb ?? ""), "ru");
-    return desc ? -cmp : cmp;
-  });
-  return out;
-}
-
-function renderHeader(colsInOrder) {
-  const thead = el("thead");
-  thead.innerHTML = "";
-  const tr = document.createElement("tr");
-  colsInOrder.forEach((c) => {
-    if (STATE.hidden[c.id]) return;
-    const th = document.createElement("th");
-    th.textContent = c.header || c.id;
-    th.draggable = true;
-    th.dataset.colId = c.id;
-    th.title = "Клик: сортировка. Перетащи: порядок колонок";
-    th.onclick = () => {
-      if (STATE.sort.id !== c.id) STATE.sort = { id: c.id, desc: false };
-      else STATE.sort = { id: c.id, desc: !STATE.sort.desc };
-      render();
-    };
-
-    th.addEventListener("dragstart", (e) => {
-      e.dataTransfer.setData("text/plain", c.id);
-      e.dataTransfer.effectAllowed = "move";
-    });
-    th.addEventListener("dragover", (e) => {
-      e.preventDefault();
-      th.style.background = "var(--muted)";
-    });
-    th.addEventListener("dragleave", () => {
-      th.style.background = "";
-    });
-    th.addEventListener("drop", (e) => {
-      e.preventDefault();
-      th.style.background = "";
-      const fromId = e.dataTransfer.getData("text/plain");
-      const toId = c.id;
-      if (!fromId || fromId === toId) return;
-      const order = [...STATE.columnOrder];
-      const a = order.indexOf(fromId);
-      const b = order.indexOf(toId);
-      if (a === -1 || b === -1) return;
-      order.splice(a, 1);
-      order.splice(b, 0, fromId);
-      STATE.columnOrder = order;
-      render();
-      setFrameHeight();
-    });
-
-    tr.appendChild(th);
-  });
-  thead.appendChild(tr);
-
-  if (STATE.showFilters) {
-    const trf = document.createElement("tr");
-    colsInOrder.forEach((c) => {
-      if (STATE.hidden[c.id]) return;
-      const th = document.createElement("th");
-      const inp = document.createElement("input");
-      inp.type = "text";
-      inp.placeholder = "фильтр…";
-      inp.value = STATE.filters[c.id] || "";
-      inp.oninput = () => {
-        STATE.filters[c.id] = inp.value;
-        renderBody(colsInOrder);
+function buildColumns(data, columnsFromPy) {
+  if (Array.isArray(columnsFromPy) && columnsFromPy.length) {
+    return columnsFromPy.map((c) => {
+      if (typeof c === 'string') {
+        return { title: c, field: c, headerFilter: true, hozAlign: 'left' };
+      }
+      // allow dict like {field,title,formatter,hozAlign,headerFilter}
+      return {
+        title: c.title || c.field,
+        field: c.field,
+        headerFilter: c.headerFilter !== undefined ? c.headerFilter : true,
+        hozAlign: c.hozAlign || 'left',
+        formatter: c.formatter || undefined,
       };
-      th.appendChild(inp);
-      trf.appendChild(th);
     });
-    thead.appendChild(trf);
+  }
+
+  // infer from data keys
+  const keys = data && data.length ? Object.keys(data[0]) : [];
+  return keys.map((k) => ({ title: k, field: k, headerFilter: true, hozAlign: 'left' }));
+}
+
+function applyLayoutFromStorage(tableId) {
+  const raw = window.localStorage.getItem(getLSKey(tableId));
+  const st = safeParseJSON(raw, null);
+  if (!st || !table) return;
+
+  // column layout
+  if (Array.isArray(st.columnsLayout)) {
+    try { table.setColumnLayout(st.columnsLayout); } catch (e) {}
+  }
+
+  // sort
+  if (Array.isArray(st.sorters)) {
+    try { table.setSort(st.sorters); } catch (e) {}
+  }
+
+  // filters
+  if (Array.isArray(st.filters)) {
+    try { table.setFilter(st.filters); } catch (e) {}
   }
 }
 
-function renderBody(colsInOrder) {
-  const tbody = el("tbody");
-  tbody.innerHTML = "";
-  const filtered = applySort(applyFilters(ARGS.data || [], colsInOrder));
-  filtered.forEach((row) => {
-    const tr = document.createElement("tr");
-    colsInOrder.forEach((c) => {
-      if (STATE.hidden[c.id]) return;
-      const td = document.createElement("td");
-      const v = row[c.id];
-      td.textContent = v === null || v === undefined ? "" : String(v);
-      tr.appendChild(td);
+function saveLayoutToStorage(tableId) {
+  if (!table) return;
+  const state = {
+    columnsLayout: table.getColumnLayout ? table.getColumnLayout() : null,
+    sorters: table.getSorters ? table.getSorters().map(s => ({ field: s.field, dir: s.dir })) : null,
+    filters: table.getFilters ? table.getFilters().map(f => ({ field: f.field, type: f.type, value: f.value })) : null,
+  };
+  window.localStorage.setItem(getLSKey(tableId), JSON.stringify(state));
+
+  // send to python too
+  Streamlit.setComponentValue(state);
+}
+
+function clearStorage(tableId) {
+  window.localStorage.removeItem(getLSKey(tableId));
+}
+
+function render({ data, columns, table_id, height }) {
+  const root = document.getElementById('root');
+  const tableId = table_id || 'table';
+
+  // full rebuild if table_id changed
+  const needRebuild = !table || lastTableId !== tableId;
+  lastTableId = tableId;
+
+  if (needRebuild) {
+    root.innerHTML = '<div id="tbl"></div><div style="padding:6px 0; display:flex; gap:8px; justify-content:flex-end;">' +
+      '<button id="saveBtn" style="font-size:12px; padding:4px 8px;">💾 Сохранить вид</button>' +
+      '<button id="resetBtn" style="font-size:12px; padding:4px 8px;">↩️ Сбросить</button>' +
+      '</div>';
+
+    const cols = buildColumns(data, columns);
+
+    table = new Tabulator('#tbl', {
+      data: data || [],
+      columns: cols,
+      layout: 'fitDataFill',
+      height: height || 520,
+      movableColumns: true,
+      resizableColumnFit: true,
+      columnHeaderSortMulti: true,
+      clipboard: true,
+      clipboardCopyRowRange: 'range',
+      placeholder: 'Нет данных',
     });
-    tbody.appendChild(tr);
+
+    // apply persisted layout after table is ready
+    table.on('tableBuilt', () => {
+      applyLayoutFromStorage(tableId);
+      Streamlit.setFrameHeight();
+    });
+
+    // auto-save on key changes
+    table.on('columnMoved', () => saveLayoutToStorage(tableId));
+    table.on('columnVisibilityChanged', () => saveLayoutToStorage(tableId));
+    table.on('columnResized', () => saveLayoutToStorage(tableId));
+    table.on('dataFiltered', () => saveLayoutToStorage(tableId));
+    table.on('dataSorted', () => saveLayoutToStorage(tableId));
+
+    document.getElementById('saveBtn').addEventListener('click', () => saveLayoutToStorage(tableId));
+    document.getElementById('resetBtn').addEventListener('click', () => {
+      clearStorage(tableId);
+      // soft reset: rebuild
+      table.destroy();
+      table = null;
+      render({ data, columns, table_id: tableId, height });
+    });
+  } else {
+    // update data fast
+    table.replaceData(data || []);
+  }
+
+  Streamlit.setFrameHeight();
+}
+
+Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, (event) => {
+  const args = event.detail.args || {};
+  render({
+    data: args.data || [],
+    columns: args.columns || [],
+    table_id: args.table_id || 'table',
+    height: args.height || 520,
   });
-}
-
-function render() {
-  if (!ARGS) return;
-  const cols = normalizeColumns(ARGS.columns, ARGS.data);
-  if (!STATE.columnOrder.length) STATE.columnOrder = cols.map((c) => c.id);
-  const colsById = new Map(cols.map((c) => [c.id, c]));
-  const colsInOrder = STATE.columnOrder.map((id) => colsById.get(id)).filter(Boolean);
-
-  buildColsPanel(cols);
-  renderHeader(colsInOrder);
-  renderBody(colsInOrder);
-}
-
-function initFromArgs(args) {
-  ARGS = args || { data: [], columns: [] };
-
-  // restore state passed from python
-  const s = (args && args.view_state) || {};
-  const cols = normalizeColumns(args.columns, args.data);
-
-  STATE.columnOrder = Array.isArray(s.columnOrder) && s.columnOrder.length ? s.columnOrder : cols.map((c) => c.id);
-  STATE.hidden = (s.hidden && typeof s.hidden === "object") ? s.hidden : {};
-  STATE.filters = (s.filters && typeof s.filters === "object") ? s.filters : {};
-  STATE.sort = (s.sort && typeof s.sort === "object") ? s.sort : { id: null, desc: false };
-  STATE.showFilters = !!s.showFilters;
-
-  el("colsPanel").style.display = "none";
-
-  renderControls();
-  render();
-  setFrameHeight();
-}
-
-// Streamlit will send args via postMessage
-window.addEventListener("message", (event) => {
-  const msg = event.data;
-  if (!msg) return;
-  if (msg.type === "streamlit:render") {
-    initFromArgs(msg.args);
-  }
 });
 
-// Let Streamlit know we're ready
-postToStreamlit("streamlit:componentReady", { apiVersion: 1 });
-postToStreamlit("streamlit:setFrameHeight", { height: 300 });
+Streamlit.setComponentReady();
+Streamlit.setFrameHeight();
