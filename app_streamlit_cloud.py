@@ -742,6 +742,41 @@ def save_opex_types(types: list[str]):
 def ensure_data_dir():
     os.makedirs(DATA_DIR, exist_ok=True)
 
+# ================== UI PREFS (columns / filters) ==================
+UI_PREFS_PATH = os.path.join(DATA_DIR, "ui_prefs.json")
+
+def _prefs_load() -> dict:
+    """Локальные настройки интерфейса.
+    В Streamlit Cloud файл может сбрасываться при деплое, но между перезапусками рантайма обычно живёт.
+    """
+    ensure_data_dir()
+    if os.path.exists(UI_PREFS_PATH):
+        try:
+            with open(UI_PREFS_PATH, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+    return {}
+
+def _prefs_save(prefs: dict) -> None:
+    ensure_data_dir()
+    try:
+        with open(UI_PREFS_PATH, "w", encoding="utf-8") as f:
+            json.dump(prefs or {}, f, ensure_ascii=False, indent=2)
+    except Exception:
+        # если файловая система read-only — просто игнор
+        pass
+
+def _prefs_get(key: str, default=None):
+    prefs = _prefs_load()
+    return prefs.get(key, default)
+
+def _prefs_set(key: str, value) -> None:
+    prefs = _prefs_load()
+    prefs[key] = value
+    _prefs_save(prefs)
+
 # ================== COGS ==================
 def normalize_cogs_upload(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -1857,6 +1892,33 @@ with tab1:
         # прибыльные метрики по новым формулам
         sold_view = compute_profitability(sold_view)
 
+        # дополнительные метрики как в юнит-экономике/для удобства
+        try:
+            sold_view["buyout_pct"] = (
+                pd.to_numeric(sold_view["qty_buyout"], errors="coerce").fillna(0.0)
+                / pd.to_numeric(sold_view["qty_orders"], errors="coerce").replace(0, pd.NA)
+                * 100.0
+            ).fillna(0.0)
+        except Exception:
+            sold_view["buyout_pct"] = 0.0
+
+        try:
+            sold_view["avg_price"] = (
+                pd.to_numeric(sold_view["accruals_net"], errors="coerce").fillna(0.0)
+                / pd.to_numeric(sold_view["qty_buyout"], errors="coerce").replace(0, pd.NA)
+            ).fillna(0.0)
+        except Exception:
+            sold_view["avg_price"] = 0.0
+
+        try:
+            sold_view["drr_pct"] = (
+                pd.to_numeric(sold_view.get("ads_total", 0.0), errors="coerce").fillna(0.0)
+                / pd.to_numeric(sold_view["accruals_net"], errors="coerce").replace(0, pd.NA)
+                * 100.0
+            ).fillna(0.0)
+        except Exception:
+            sold_view["drr_pct"] = 0.0
+
         show = sold_view.copy()
         show = show.rename(columns={
             "article": "Артикул",
@@ -1878,13 +1940,16 @@ with tab1:
             "profit_per_unit": "Прибыль на 1 шт, ₽",
             "margin_%": "Маржинальность, %",
             "roi_%": "ROI, %",
+            "buyout_pct": "% выкупа",
+            "avg_price": "Средняя цена продажи, ₽",
+            "drr_pct": "DRR, %",
         })
 
         # порядок колонок
         cols = [
             "Артикул","SKU","Название",
-            "Заказы, шт","Возвраты, шт","Выкуп, шт",
-            "Выручка, ₽",
+            "Заказы, шт","Возвраты, шт","Выкуп, шт","% выкупа",
+            "Выручка, ₽","Средняя цена продажи, ₽","DRR, %",
             "Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽",
             "Реклама, ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽",
@@ -1904,16 +1969,73 @@ with tab1:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0).astype(int)
 
         money_cols = [
-            "Выручка, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
+            "Выручка, ₽","Средняя цена продажи, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽",
         ]
         for c in money_cols:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
-        pct_cols = ["Маржинальность, %","ROI, %"]
+        pct_cols = ["% выкупа", "DRR, %", "Маржинальность, %","ROI, %"]
         for c in pct_cols:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
+
+        # --- Настройка колонок (порядок/скрытие) ---
+        prefs = _prefs_load()
+        pref_key = "soldsku_table"
+        cfg = prefs.get(pref_key, {}) if isinstance(prefs.get(pref_key, {}), dict) else {}
+
+        # восстанавливаем: какие колонки показывать и их порядок
+        show_flags = cfg.get("show", {}) if isinstance(cfg.get("show", {}), dict) else {}
+        order_map = cfg.get("order", {}) if isinstance(cfg.get("order", {}), dict) else {}
+
+        with st.expander("Настроить таблицу (колонки)", expanded=False):
+            cfg_df = pd.DataFrame({
+                "Показывать": [bool(show_flags.get(c, True)) for c in cols],
+                "Порядок": [int(order_map.get(c, i+1)) for i, c in enumerate(cols)],
+                "Колонка": cols,
+            })
+
+            cfg_edit = st.data_editor(
+                cfg_df,
+                hide_index=True,
+                use_container_width=True,
+                num_rows="fixed",
+                column_config={
+                    "Показывать": st.column_config.CheckboxColumn(width="small"),
+                    "Порядок": st.column_config.NumberColumn(width="small", step=1, min_value=1),
+                    "Колонка": st.column_config.TextColumn(disabled=True),
+                },
+                key="soldsku_cols_editor",
+            )
+
+            csave, cres = st.columns([1.2, 1.2])
+            with csave:
+                if st.button("Сохранить колонки", use_container_width=True, key="soldsku_cols_save"):
+                    new_show = {r["Колонка"]: bool(r["Показывать"]) for _, r in cfg_edit.iterrows()}
+                    new_order = {r["Колонка"]: int(r["Порядок"]) for _, r in cfg_edit.iterrows()}
+                    prefs[pref_key] = {"show": new_show, "order": new_order}
+                    _prefs_save(prefs)
+                    st.success("Сохранено")
+                    st.rerun()
+            with cres:
+                if st.button("Сбросить колонки", use_container_width=True, key="soldsku_cols_reset"):
+                    if pref_key in prefs:
+                        prefs.pop(pref_key, None)
+                        _prefs_save(prefs)
+                    st.success("Сброшено")
+                    st.rerun()
+
+        # применяем настройки
+        cols_visible = [c for c in cols if bool(show_flags.get(c, True))]
+        # сортируем по "Порядок", а неизвестные — в конец
+        cols_visible = sorted(cols_visible, key=lambda c: int(order_map.get(c, 10_000)))
+        # гарантируем что обязательные колонки не пропали
+        for must in ["Артикул", "SKU", "Название"]:
+            if must in cols and must not in cols_visible:
+                cols_visible.insert(0, must)
+
+        show = show[cols_visible].copy()
 
         st.dataframe(
             show,
@@ -1924,6 +2046,8 @@ with tab1:
                 "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
                 "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
                 **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols},
+                "% выкупа": st.column_config.NumberColumn(format="%.1f"),
+                "DRR, %": st.column_config.NumberColumn(format="%.1f"),
                 "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
                 "ROI, %": st.column_config.NumberColumn(format="%.1f"),
             }
