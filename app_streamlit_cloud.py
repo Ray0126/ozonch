@@ -8,6 +8,9 @@ import pandas as pd
 
 # Optional: custom lightweight table component with drag&drop columns
 import traceback
+from pathlib import Path
+st.write("dist exists:", Path("ozon_table_component/frontend/dist").exists())
+st.write("dist files:", list(Path("ozon_table_component/frontend/dist").glob("*"))[:10])
 try:
     from ozon_table_component.component import ozon_table as tanstack_table
 except Exception as e:
