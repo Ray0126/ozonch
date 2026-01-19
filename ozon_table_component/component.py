@@ -15,7 +15,7 @@ _ozon_table_component = components.declare_component(
 
 
 def ozon_table(
-    data: Optional[List[Dict[str, Any]]] = None,
+    data: Any = None,
     columns: Optional[List[Dict[str, Any]]] = None,
     *,
     # Backward/compat kwargs (so app.py can evolve without breaking)
@@ -43,10 +43,20 @@ def ozon_table(
     """
 
     # --- Normalize inputs ---
-    # Allow passing a pandas DataFrame via df= or rows=
+    # Allow passing a pandas DataFrame via df= / data= / rows=
     if data is None:
         data = []
-    if df is not None and not data:
+
+    # If caller accidentally passed a DataFrame into `data`, convert it.
+    try:
+        import pandas as pd  # type: ignore
+
+        if isinstance(data, pd.DataFrame):
+            data = data.to_dict(orient="records")
+    except Exception:
+        pass
+
+    if df is not None and isinstance(data, list) and len(data) == 0:
         try:
             import pandas as pd  # type: ignore
 
@@ -55,7 +65,7 @@ def ozon_table(
         except Exception:
             # If pandas isn't available or df isn't a DataFrame, ignore
             pass
-    if rows is not None and not data:
+    if rows is not None and isinstance(data, list) and len(data) == 0:
         # rows can already be list[dict]
         if isinstance(rows, list):
             data = rows  # type: ignore
@@ -71,8 +81,8 @@ def ozon_table(
     init_state = state if isinstance(state, dict) else (default_state if isinstance(default_state, dict) else {})
 
     payload = {
-        "data": data or [],
-        "columns": columns or [],
+        "data": data if data is not None else [],
+        "columns": columns if columns is not None else [],
         "table_id": table_id,
         "height": int(height),
         "state": init_state,
