@@ -2,25 +2,34 @@ import os
 import io
 import time
 import json
+import sys
+import traceback
+from pathlib import Path
+from datetime import date, timedelta, datetime
+
 import requests
 import streamlit as st
 import pandas as pd
+from dotenv import load_dotenv
+
+
+# ✅ ВАЖНО: ПЕРВОЕ streamlit-действие в файле
+st.set_page_config(page_title="Ozonch", layout="wide")
+
 
 # Optional: custom lightweight table component with drag&drop columns
-import traceback
-from pathlib import Path
-st.write("dist exists:", Path("ozon_table_component/frontend/dist").exists())
-st.write("dist files:", list(Path("ozon_table_component/frontend/dist").glob("*"))[:10])
+# (тут уже можно st.write / st.error)
+DIST_DIR = Path("ozon_table_component/frontend/dist")
+st.write("dist exists:", DIST_DIR.exists())
+st.write("dist files:", list(DIST_DIR.glob("*"))[:10])
+
 try:
     from ozon_table_component.component import ozon_table as tanstack_table
-except Exception as e:
+except Exception:
     tanstack_table = None
     st.error("❌ TanStack component import failed")
     st.code(traceback.format_exc())
-from datetime import date, timedelta, datetime
-from dotenv import load_dotenv
-import sys
-from pathlib import Path
+
 
 # ================== AUTH ==================
 APP_PASSWORD = os.getenv("APP_PASSWORD")
@@ -44,6 +53,7 @@ if not st.session_state.auth_ok:
         """,
         unsafe_allow_html=True,
     )
+
 
     with st.container():
         st.markdown('<div class="auth-box">', unsafe_allow_html=True)
