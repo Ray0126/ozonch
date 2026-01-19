@@ -1,104 +1,116 @@
+"""Ozon TanStack table Streamlit component (Python wrapper).
+
+This version is cloud-safe:
+- No DataFrame truthiness checks (fixes ValueError: ambiguous truth value)
+- Accepts pandas.DataFrame or list[dict]
+- Signature tolerant to extra kwargs
+
+Repo layout expected:
+  ozon_table_component/
+    __init__.py
+    component.py
+    frontend/dist/index.html
+    frontend/dist/main.js
+"""
+
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
-import streamlit as st
 import streamlit.components.v1 as components
 
 try:
     import pandas as pd  # type: ignore
-except Exception:
-    pd = None  # noqa
+except Exception:  # pragma: no cover
+    pd = None  # type: ignore
 
-_BUILD_DIR = (Path(__file__).parent / "frontend" / "dist").resolve()
 
-_ozon_table_component = components.declare_component(
+# IMPORTANT: the frontend assets MUST exist at this path at runtime
+_DIST_PATH = Path(__file__).resolve().parent / "frontend" / "dist"
+
+# Use an internal name for the component function to avoid confusing error messages
+_component_func = components.declare_component(
     "ozon_table_component",
-    path=str(_BUILD_DIR),
+    path=str(_DIST_PATH),
 )
 
+
 def _to_records(data: Any) -> List[Dict[str, Any]]:
-    # list[dict]
+    """Convert supported inputs to list-of-dicts (JSON serializable)."""
+    if data is None:
+        return []
+
+    # pandas DataFrame
+    if pd is not None and hasattr(data, "to_dict") and data.__class__.__name__ == "DataFrame":
+        try:
+            df = data
+            # replace NaN with None for JSON
+            df = df.where(df.notna(), None)
+            return df.to_dict(orient="records")
+        except Exception:
+            return []
+
+    # already list of dicts
     if isinstance(data, list):
-        return data
-    # dict -> [dict]
+        out: List[Dict[str, Any]] = []
+        for item in data:
+            if isinstance(item, dict):
+                out.append(item)
+        return out
+
+    # single dict
     if isinstance(data, dict):
         return [data]
-    # pandas.DataFrame
-    if pd is not None:
-        try:
-            if isinstance(data, pd.DataFrame):
-                return data.to_dict("records")
-        except Exception:
-            pass
-    # fallback
+
     return []
 
-def _infer_columns(records: List[Dict[str, Any]]) -> List[str]:
-    if not records:
-        return []
-    # берем ключи первой строки
-    try:
-        return list(records[0].keys())
-    except Exception:
-        return []
 
-def ozon_table(*args, **kwargs) -> Dict[str, Any]:
+def ozon_table(
+    data: Any = None,
+    *,
+    key: str,
+    columns: Optional[List[Dict[str, Any]]] = None,
+    default_view: Optional[Dict[str, Any]] = None,
+    height: int = 520,
+    debug: bool = False,
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """Render the TanStack table component.
+
+    Parameters
+    - data: pandas.DataFrame or list[dict]
+    - key: Streamlit component key
+    - columns: optional column definitions for the frontend
+    - default_view: persisted view state (order, hidden, filters, etc.)
+    - height: component height in px
+
+    Returns
+    - dict view state from frontend (or default_view if nothing returned)
     """
-    Универсальный враппер:
-    - не падает, если app передал "лишние" kwargs
-    - принимает data как DataFrame / list[dict] / dict
-    """
 
-    # Поддержим и позиционные вызовы на всякий
-    data = None
-    columns = None
-    state = None
+    records = _to_records(data)
 
-    if len(args) >= 1:
-        data = args[0]
-    if len(args) >= 2:
-        columns = args[1]
-    if len(args) >= 3:
-        state = args[2]
-
-    data = kwargs.get("data", data)
-    columns = kwargs.get("columns", columns)
-    state = kwargs.get("state", state) or kwargs.get("table_state") or kwargs.get("value") or {}
-    height = int(kwargs.get("height", 520) or 520)
-    key = str(kwargs.get("key", "ozon_table_component") or "ozon_table_component")
-
-    # Если dist не на месте — не роняем приложение
-    if not (_BUILD_DIR / "index.html").exists():
-        st.warning("Компонент таблицы не собран: нет frontend/dist/index.html. Показываю обычную таблицу.")
-        recs = _to_records(data)
-        st.dataframe(recs, use_container_width=True, height=height)
-        return state if isinstance(state, dict) else {}
-
-    recs = _to_records(data)
-
-    # columns: может прийти списком, может None
-    if isinstance(columns, (list, tuple)):
-        cols = [str(c) for c in columns]
-    else:
-        cols = _infer_columns(recs)
-
-    payload = {
-        "data": recs,
-        "columns": cols,
-        "state": state if isinstance(state, dict) else {},
+    payload: Dict[str, Any] = {
+        "data": records,
+        "columns": columns or [],
+        "defaultView": default_view or {},
+        "debug": debug,
     }
 
-    result = _ozon_table_component(
-        **payload,
-        default=payload["state"],
+    # Forward-compatible: some frontend builds expect top-level props instead of payload.
+    # We'll provide both.
+    result = _component_func(
+        payload=payload,
+        data=payload["data"],
+        columns=payload["columns"],
+        defaultView=payload["defaultView"],
+        debug=payload["debug"],
         key=key,
         height=height,
+        **kwargs,
     )
 
-    if result is None:
-        return payload["state"]
     if isinstance(result, dict):
         return result
-    return payload["state"]
+    return default_view or {}
