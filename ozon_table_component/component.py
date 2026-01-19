@@ -1,92 +1,39 @@
-from __future__ import annotations
-
-import os
-from typing import Any, Dict, List, Optional
-
 import streamlit.components.v1 as components
+from pathlib import Path
 
-_COMPONENT_DIR = os.path.dirname(os.path.abspath(__file__))
-_FRONTEND_DIST = os.path.join(_COMPONENT_DIR, "frontend", "dist")
+_DIST_DIR = Path(__file__).parent / "frontend" / "dist"
 
-_ozon_table_component = components.declare_component(
+_component = components.declare_component(
     "ozon_table_component",
-    path=_FRONTEND_DIST,
+    path=str(_DIST_DIR),
 )
 
-
 def ozon_table(
-    data: Any = None,
-    columns: Optional[List[Dict[str, Any]]] = None,
-    *,
-    # Backward/compat kwargs (so app.py can evolve without breaking)
-    df: Any = None,
-    rows: Any = None,
-    col_defs: Any = None,
-    default_state: Optional[Dict[str, Any]] = None,
-    state: Optional[Dict[str, Any]] = None,
-    table_id: str = "table",
-    height: int = 520,
-    key: Optional[str] = None,
-    **_ignored: Any,
-) -> Dict[str, Any]:
-    """Render interactive table.
+    df=None,
+    data=None,
+    columns=None,
+    state=None,
+    key=None,
+    height=520,
+    **kwargs,
+):
+    # если передали df — конвертим в records
+    if df is not None and data is None:
+        data = df.to_dict("records")
+        if columns is None:
+            columns = list(df.columns)
 
-    Args:
-        data: list of row dicts
-        columns: optional column definitions; if omitted frontend infers from data keys
-        table_id: used for persistent layout in browser localStorage
-        height: px
-        key: Streamlit component key
-
-    Returns:
-        dict with current state (e.g., column order/hidden, filters) or empty dict.
-    """
-
-    # --- Normalize inputs ---
-    # Allow passing a pandas DataFrame via df= / data= / rows=
     if data is None:
         data = []
-
-    # If caller accidentally passed a DataFrame into `data`, convert it.
-    try:
-        import pandas as pd  # type: ignore
-
-        if isinstance(data, pd.DataFrame):
-            data = data.to_dict(orient="records")
-    except Exception:
-        pass
-
-    if df is not None and isinstance(data, list) and len(data) == 0:
-        try:
-            import pandas as pd  # type: ignore
-
-            if isinstance(df, pd.DataFrame):
-                data = df.to_dict(orient="records")
-        except Exception:
-            # If pandas isn't available or df isn't a DataFrame, ignore
-            pass
-    if rows is not None and isinstance(data, list) and len(data) == 0:
-        # rows can already be list[dict]
-        if isinstance(rows, list):
-            data = rows  # type: ignore
-
-    # Column defs aliases
-    if columns is None and col_defs is not None:
-        if isinstance(col_defs, list):
-            columns = col_defs  # type: ignore
     if columns is None:
         columns = []
 
-    # Prefer explicit `state`, else `default_state`
-    init_state = state if isinstance(state, dict) else (default_state if isinstance(default_state, dict) else {})
-
-    payload = {
-        "data": data if data is not None else [],
-        "columns": columns if columns is not None else [],
-        "table_id": table_id,
-        "height": int(height),
-        "state": init_state,
-    }
-
-    # default={} is what Streamlit returns before the component posts back.
-    return _ozon_table_component(**payload, key=key, default={})
+    return _component(
+        data=data,
+        columns=columns,
+        state=state or {},
+        height=height,
+        key=key,
+        default=None,
+        **kwargs,
+    )
