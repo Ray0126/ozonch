@@ -2,34 +2,13 @@ import os
 import io
 import time
 import json
-import sys
-import traceback
-from pathlib import Path
-from datetime import date, timedelta, datetime
-
 import requests
 import streamlit as st
 import pandas as pd
+from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
-
-
-# ✅ ВАЖНО: ПЕРВОЕ streamlit-действие в файле
-st.set_page_config(page_title="Ozonch", layout="wide")
-
-
-# Optional: custom lightweight table component with drag&drop columns
-# (тут уже можно st.write / st.error)
-DIST_DIR = Path("ozon_table_component/frontend/dist")
-st.write("dist exists:", DIST_DIR.exists())
-st.write("dist files:", list(DIST_DIR.glob("*"))[:10])
-
-try:
-    from ozon_table_component.component import ozon_table as tanstack_table
-except Exception:
-    tanstack_table = None
-    st.error("❌ TanStack component import failed")
-    st.code(traceback.format_exc())
-
+import sys
+from pathlib import Path
 
 # ================== AUTH ==================
 APP_PASSWORD = os.getenv("APP_PASSWORD")
@@ -53,7 +32,6 @@ if not st.session_state.auth_ok:
         """,
         unsafe_allow_html=True,
     )
-
 
     with st.container():
         st.markdown('<div class="auth-box">', unsafe_allow_html=True)
@@ -1937,62 +1915,19 @@ with tab1:
         for c in pct_cols:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
-        use_modern = False
-        if tanstack_table is not None:
-            use_modern = st.toggle(
-                "Лёгкая таблица с перетаскиванием колонок (drag&drop)",
-                value=True,
-                help="Можно перетаскивать колонки мышкой, скрывать колонки и включать фильтры прямо в таблице."
-            )
-
-        if use_modern and tanstack_table is not None:
-            # Состояние вида таблицы хранится в session_state (переживает перезагрузки страницы)
-            view_key = "soldsku_view_state"
-            default_view = st.session_state.get(view_key) or {}
-
-            left, right = st.columns([1, 1])
-            with left:
-                if st.button("💾 Сохранить вид таблицы", use_container_width=True):
-                    # сохраняем текущее состояние (оно обновляется ниже после рендера)
-                    st.session_state[view_key] = st.session_state.get(view_key, default_view)
-                    st.success("Вид таблицы сохранён")
-            with right:
-                if st.button("↩️ Сбросить вид", use_container_width=True):
-                    st.session_state[view_key] = {}
-                    st.info("Вид таблицы сброшен")
-
-            data_records = show.to_dict(orient="records")
-            cols = list(show.columns)
-            try:
-                new_state = tanstack_table(
-                    data=data_records,
-                    columns=cols,
-                    state=st.session_state.get(view_key, {}),
-                    key="soldsku_table",
-                    height=520,
-                )
-                # Компонент возвращает состояние (колонки/фильтры/поиск).
-                if isinstance(new_state, dict) and new_state:
-                    st.session_state[view_key] = new_state
-            except Exception as e:
-                st.warning("Не удалось загрузить лёгкую таблицу с drag&drop. Показываю стандартную таблицу.")
-                st.caption(str(e))
-                st.dataframe(show, use_container_width=True, hide_index=True)
-
-        else:
-            st.dataframe(
-                show,
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
-                    "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
-                    "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
-                    **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols},
-                    "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
-                    "ROI, %": st.column_config.NumberColumn(format="%.1f"),
-                }
-            )
+        st.dataframe(
+            show,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
+                "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
+                "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
+                **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols},
+                "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
+                "ROI, %": st.column_config.NumberColumn(format="%.1f"),
+            }
+        )
 
         st.download_button(
             "Скачать XLSX (таблица проданных SKU)",
