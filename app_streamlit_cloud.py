@@ -20,9 +20,21 @@ if not st.session_state.auth_ok:
     st.markdown(
         """
         <style>
+        .auth-banner {
+            max-width: 420px;
+            margin: 60px auto 18px;
+            padding: 16px 22px;
+            border-radius: 12px;
+            background: #1f1f24;
+            box-shadow: 0 0 30px rgba(0,0,0,0.35);
+            text-align: center;
+            font-weight: 700;
+            font-size: 20px;
+            color: #ffffff;
+        }
         .auth-box {
             max-width: 420px;
-            margin: 120px auto;
+            margin: 0 auto 80px;
             padding: 30px;
             border-radius: 12px;
             background: #1f1f24;
@@ -32,6 +44,8 @@ if not st.session_state.auth_ok:
         """,
         unsafe_allow_html=True,
     )
+
+    st.markdown('<div class="auth-banner">Оцифровка по Ozon</div>', unsafe_allow_html=True)
 
     with st.container():
         st.markdown('<div class="auth-box">', unsafe_allow_html=True)
@@ -1988,7 +2002,13 @@ with tab1:
         st.session_state[order_key] = cur
         st.session_state[hide_key] = [c for c in st.session_state[hide_key] if c in default_cols]
 
-        with st.expander("⚙️ Колонки таблицы", expanded=False):
+        # Держим блок настроек колонок открытым после кликов (Streamlit делает rerun)
+        if "soldsku_cols_expanded" not in st.session_state:
+            st.session_state["soldsku_cols_expanded"] = True
+        if "soldsku_last_col" not in st.session_state:
+            st.session_state["soldsku_last_col"] = ""
+
+        with st.expander("⚙️ Колонки таблицы", expanded=st.session_state.get("soldsku_cols_expanded", False)):
             colA, colB, colC = st.columns([2.2, 1.2, 1.6])
 
             with colA:
@@ -2020,7 +2040,7 @@ with tab1:
                         try:
                             order_str = ",".join(st.session_state[order_key])
                             hide_str = ",".join(st.session_state[hide_key])
-                            _qp_set({qp_order_key: order_str, qp_hide_key: hide_str})
+                            _qp_set(**{qp_order_key: order_str, qp_hide_key: hide_str})
                             st.success("Сохранено")
                         except Exception:
                             st.warning("Не удалось сохранить в URL")
@@ -2029,18 +2049,25 @@ with tab1:
                         st.session_state[order_key] = default_cols
                         st.session_state[hide_key] = []
                         try:
-                            _qp_set({qp_order_key: "", qp_hide_key: ""})
+                            _qp_set(**{qp_order_key: "", qp_hide_key: ""})
                         except Exception:
                             pass
                         st.rerun()
 
             if picked and (left or right):
+                st.session_state["soldsku_cols_expanded"] = True
+                st.session_state["soldsku_last_col"] = picked
                 cols = st.session_state[order_key]
                 i = cols.index(picked)
                 j = i - 1 if left else i + 1
                 if 0 <= j < len(cols):
                     cols[i], cols[j] = cols[j], cols[i]
                     st.session_state[order_key] = cols
+                    # Автосохранение в URL, чтобы переживало перезагрузку страницы
+                    try:
+                        _qp_set(**{qp_order_key: ",".join(st.session_state[order_key]), qp_hide_key: ",".join(st.session_state[hide_key])})
+                    except Exception:
+                        pass
                     st.rerun()
 
             st.session_state[hide_key] = st.multiselect(
