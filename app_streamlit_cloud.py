@@ -5,6 +5,12 @@ import json
 import requests
 import streamlit as st
 import pandas as pd
+
+# Optional: custom lightweight table component with drag&drop columns
+try:
+    from ozon_table_component import tanstack_table
+except Exception:
+    tanstack_table = None
 from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
 import sys
@@ -1896,20 +1902,6 @@ with tab1:
             if c not in show.columns:
                 show[c] = 0.0
         show = show[cols].copy()
-
-
-        # Доп. метрики (как ты просил)
-        try:
-            orders = pd.to_numeric(show.get("Заказы, шт."), errors="coerce").fillna(0.0)
-            buyout = pd.to_numeric(show.get("Выкуп, шт."), errors="coerce").fillna(0.0)
-            rev = pd.to_numeric(show.get("Выручка, ₽"), errors="coerce").fillna(0.0)
-            ads = pd.to_numeric(show.get("Реклама, ₽"), errors="coerce").fillna(0.0)
-
-            show["% выкупа"] = (buyout / orders.where(orders != 0) * 100).fillna(0.0)
-            show["Средняя цена продажи"] = (rev / buyout.where(buyout != 0)).fillna(0.0)
-            show["ДРР, %"] = (ads / rev.where(rev != 0) * 100).fillna(0.0)
-        except Exception:
-            pass
         show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
         # Сортировка должна работать корректно => оставляем числовые типы
         # Числа приводим, но НЕ форматируем в строки
@@ -1929,34 +1921,53 @@ with tab1:
         for c in pct_cols:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
-        # Таблица в "лёгком" стиле, но с drag&drop колонок + встроенными фильтрами/сортировкой.
-        # Требование: st-aggrid (добавь в requirements.txt: st-aggrid)
-        try:
-            from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode
-
-            gb = GridOptionsBuilder.from_dataframe(show)
-            gb.configure_default_column(resizable=True, sortable=True, filter=True)
-            gb.configure_grid_options(
-                suppressDragLeaveHidesColumns=True,
-                suppressFieldDotNotation=True,
+        use_modern = False
+        if tanstack_table is not None:
+            use_modern = st.toggle(
+                "Лёгкая таблица с перетаскиванием колонок (drag&drop)",
+                value=True,
+                help="Можно перетаскивать колонки мышкой, скрывать колонки и включать фильтры прямо в таблице."
             )
-            grid_options = gb.build()
 
-            AgGrid(
+        if use_modern and tanstack_table is not None:
+            # Состояние вида таблицы хранится в session_state (переживает перезагрузки страницы)
+            view_key = "soldsku_view_state"
+            default_view = st.session_state.get(view_key) or {}
+
+            left, right = st.columns([1, 1])
+            with left:
+                if st.button("💾 Сохранить вид таблицы", use_container_width=True):
+                    st.session_state[view_key] = st.session_state.get(view_key, default_view)
+                    st.success("Вид таблицы сохранён")
+            with right:
+                if st.button("↩️ Сбросить вид", use_container_width=True):
+                    st.session_state[view_key] = {}
+                    st.info("Вид таблицы сброшен")
+
+            new_state = tanstack_table(
                 show,
-                gridOptions=grid_options,
-                theme="balham",
+                key="soldsku_table",
+                default_view=st.session_state.get(view_key, {}),
                 height=520,
-                update_mode=GridUpdateMode.NO_UPDATE,
-                data_return_mode=DataReturnMode.AS_INPUT,
-                fit_columns_on_grid_load=False,
-                allow_unsafe_jscode=False,
-                key="soldsku_grid",
             )
-            st.caption("Колонки можно перетаскивать мышкой прямо в заголовках (как в Excel). В заголовке есть меню сортировки/фильтра.")
-        except Exception:
-            st.dataframe(show, use_container_width=True, hide_index=True)
-            st.caption("Чтобы включить перетаскивание колонок и встроенные фильтры, поставь пакет st-aggrid.")
+            # Компонент возвращает состояние (колонки/фильтры/сортировка). Сохраняем автоматически.
+            if isinstance(new_state, dict) and new_state:
+                st.session_state[view_key] = new_state
+
+        else:
+            st.dataframe(
+                show,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
+                    "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
+                    "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
+                    **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols},
+                    "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
+                    "ROI, %": st.column_config.NumberColumn(format="%.1f"),
+                }
+            )
 
         st.download_button(
             "Скачать XLSX (таблица проданных SKU)",
