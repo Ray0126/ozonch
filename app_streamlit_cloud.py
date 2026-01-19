@@ -2047,51 +2047,158 @@ with tab1:
             except Exception:
                 pass
 
-        # настройка колонок (лёгкая)
-        with st.expander("Колонки (порядок / скрыть)", expanded=False):
-            st.caption("Это упрощённый вариант. Если нужен drag&drop — включи режим 'Грид'.")
-            c1, c2 = st.columns([1.2, 1.2])
-            with c1:
-                mode = st.radio("Вид таблицы", options=["Лёгкая", "Грид"], index=0 if saved_mode == "Лёгкая" else 1, horizontal=True, key="soldsku_mode")
-            with c2:
-                if st.button("Сбросить настройки", use_container_width=True, key="soldsku_reset_v2"):
+        # настройка колонок / режим отображения
+        st.markdown("#### Настройки таблицы")
+        left, right = st.columns([1.2, 1.0])
+        with left:
+            mode_now = st.radio(
+                "Вид таблицы",
+                options=["Лёгкая", "Грид"],
+                index=0 if saved_mode == "Лёгкая" else 1,
+                horizontal=True,
+                key="soldsku_mode",
+                label_visibility="collapsed",
+            )
+        with right:
+            cbtn1, cbtn2 = st.columns(2)
+            with cbtn1:
+                if st.button("↩️ Сбросить", use_container_width=True, key="soldsku_reset_v3"):
                     prefs = _prefs_load()
                     prefs.pop(pref_key, None)
                     _prefs_save(prefs)
                     st.success("Сброшено")
                     st.rerun()
+            with cbtn2:
+                # в "Лёгкой" сохраняем только быстрые фильтры;
+                # в "Грид" — ещё и состояние колонок/фильтров/сортировки из AgGrid
+                if st.button("💾 Сохранить", use_container_width=True, key="soldsku_save_v3"):
+                    prefs = _prefs_load()
+                    cfg2 = prefs.get(pref_key, {}) if isinstance(prefs.get(pref_key, {}), dict) else {}
+                    cfg2.update({
+                        "mode": mode_now,
+                        "q": q,
+                        "min_rev": float(min_rev),
+                        "min_profit": float(min_profit),
+                        "only_pos": bool(only_pos),
+                    })
+                    # если мы в гриде — подтянем состояние из session_state
+                    grid_state = st.session_state.get("soldsku_grid_state")
+                    if isinstance(grid_state, dict):
+                        cfg2["grid_state"] = grid_state
+                    prefs[pref_key] = cfg2
+                    _prefs_save(prefs)
+                    st.success("Сохранено")
+                    st.rerun()
 
-            visible_sel = st.multiselect(
-                "Какие колонки показывать",
-                options=cols,
-                default=visible_cols,
-                key="soldsku_visible_sel",
+        st.caption("Лёгкая — красивый вид как раньше. Грид — Excel-режим: перетаскивание колонок, встроенные фильтры в заголовках, изменение ширины.")
+
+        # --------------------
+        # ГРИД: даём пользователю drag&drop колонок и встроенные фильтры
+        # --------------------
+        if mode_now == "Грид":
+            try:
+                from st_aggrid import AgGrid, GridOptionsBuilder, GridUpdateMode, DataReturnMode  # type: ignore
+
+                # готовим dataframe для грида: округлим, чтобы не было "бесконечных" дробей
+                show_grid = show2.copy()
+                for c in show_grid.columns:
+                    if c in int_cols and c in show_grid.columns:
+                        show_grid[c] = pd.to_numeric(show_grid[c], errors="coerce").fillna(0).astype(int)
+                    elif c in (percent_cols | ratio_cols) and c in show_grid.columns:
+                        show_grid[c] = pd.to_numeric(show_grid[c], errors="coerce")
+                        show_grid[c] = show_grid[c].round(2)
+                    elif c in money_cols and c in show_grid.columns:
+                        show_grid[c] = pd.to_numeric(show_grid[c], errors="coerce")
+                        show_grid[c] = show_grid[c].round(2)
+
+                gb = GridOptionsBuilder.from_dataframe(show_grid)
+                gb.configure_default_column(
+                    sortable=True,
+                    filter=True,
+                    resizable=True,
+                    minWidth=110,
+                    wrapText=False,
+                    autoHeight=False,
+                )
+
+                # nicer defaults
+                gb.configure_grid_options(
+                    enableRangeSelection=True,
+                    suppressDragLeaveHidesColumns=False,
+                    rowSelection="multiple",
+                    headerHeight=36,
+                )
+
+                # восстанавливаем сохранённое состояние грида (порядок/скрытие/фильтры/сортировки)
+                saved_state = saved_cfg.get("grid_state") if isinstance(saved_cfg, dict) else None
+                grid_opts = gb.build()
+                if isinstance(saved_state, dict):
+                    # streamlit-aggrid умеет принять эти куски через gridOptions
+                    # (они игнорируются, если формат отличается — тогда просто стартуем "с нуля")
+                    grid_opts["columnState"] = saved_state.get("columnState")
+                    grid_opts["filterModel"] = saved_state.get("filterModel")
+                    grid_opts["sortModel"] = saved_state.get("sortModel")
+
+                resp = AgGrid(
+                    show_grid,
+                    gridOptions=grid_opts,
+                    update_mode=GridUpdateMode.MODEL_CHANGED | GridUpdateMode.COLUMN_MOVED | GridUpdateMode.FILTERING_CHANGED | GridUpdateMode.SORTING_CHANGED,
+                    data_return_mode=DataReturnMode.AS_INPUT,
+                    height=560,
+                    fit_columns_on_grid_load=False,
+                    enable_enterprise_modules=False,
+                    theme="balham",
+                    key="soldsku_grid",
+                )
+
+                # сохраняем состояние в session_state (кнопка "Сохранить" выше это подхватит)
+                # у разных версий st-aggrid ключи могут отличаться — берём то, что есть
+                state = {}
+                if isinstance(resp, dict):
+                    for k_src, k_dst in [("column_state", "columnState"), ("filter_model", "filterModel"), ("sort_model", "sortModel")]:
+                        if k_src in resp and resp[k_src] is not None:
+                            state[k_dst] = resp[k_src]
+                    # иногда ответ лежит в resp["gridState"]
+                    if not state and isinstance(resp.get("gridState"), dict):
+                        gs = resp["gridState"]
+                        state = {
+                            "columnState": gs.get("columnState"),
+                            "filterModel": gs.get("filterModel"),
+                            "sortModel": gs.get("sortModel"),
+                        }
+                if state:
+                    st.session_state["soldsku_grid_state"] = state
+
+                # IMPORTANT: для экспорта/дальнейших расчётов берём исходный show2
+                # (AgGrid может возвращать изменённые типы).
+
+            except Exception as e:
+                st.warning(f"Режим 'Грид' недоступен или не смог загрузиться: {e}. Показываю 'Лёгкую'.")
+                mode_now = "Лёгкая"
+
+        # --------------------
+        # ЛЁГКАЯ: чистый st.dataframe
+        # --------------------
+        if mode_now == "Лёгкая":
+            st.dataframe(
+                show2,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
+                    "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
+                    "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
+                    **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols if c in show2.columns},
+                    "% выкупа": st.column_config.NumberColumn(format="%.1f"),
+                    "DRR, %": st.column_config.NumberColumn(format="%.1f"),
+                    "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
+                    "ROI, %": st.column_config.NumberColumn(format="%.1f"),
+                }
             )
-            order_sel = st.multiselect(
-                "Порядок колонок (кликни в нужной последовательности)",
-                options=cols,
-                default=order_cols,
-                key="soldsku_order_sel",
-            )
 
-            if st.button("Сохранить настройки таблицы", use_container_width=True, key="soldsku_save_v2"):
-                prefs = _prefs_load()
-                cfg2 = prefs.get(pref_key, {}) if isinstance(prefs.get(pref_key, {}), dict) else {}
-                cfg2.update({
-                    "visible": list(visible_sel),
-                    "order": list(order_sel),
-                    "mode": mode,
-                    "q": q,
-                    "min_rev": float(min_rev),
-                    "min_profit": float(min_profit),
-                    "only_pos": bool(only_pos),
-                })
-                prefs[pref_key] = cfg2
-                _prefs_save(prefs)
-                st.success("Сохранено")
-                st.rerun()
-
-        # применяем порядок/видимость
+        # для экспорта лучше сохранять то, что видишь
+        show = show2
+# применяем порядок/видимость
         visible_sel = [c for c in (st.session_state.get("soldsku_visible_sel") or visible_cols) if c in cols]
         order_sel = [c for c in (st.session_state.get("soldsku_order_sel") or order_cols) if c in cols]
         order_sel = order_sel + [c for c in cols if c not in order_sel]
