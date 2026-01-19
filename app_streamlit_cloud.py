@@ -1923,74 +1923,57 @@ with tab1:
         default_cols = list(show.columns)
         order_key = "soldsku_col_order"
         hide_key = "soldsku_col_hidden"
-        sel_key = "soldsku_col_sel_last"
 
-        # --- Persist view across full page reloads via query params ---
-        # st.session_state сбрасывается при F5, поэтому храним настройки вида
-        # (порядок + скрытые колонки + последняя выбранная колонка) в URL.
-        # Это простой способ без Supabase/файлов.
-        import base64 as _b64
+        # Сохранение настроек (порядок/скрытые) в URL query params,
+        # чтобы переживало F5 и повторный заход по ссылке.
+        qp_order_key = "soldsku_cols"
+        qp_hide_key = "soldsku_hide"
 
-        def _qp_get_one(k: str):
+        def _qp_get_one(key: str) -> str:
+            """Безопасно читаем query param как строку (поддержка разных версий Streamlit)."""
             try:
-                v = st.query_params.get(k)
-                return v if isinstance(v, str) else (v[0] if v else None)
+                # Streamlit 1.30+: st.query_params
+                qp = getattr(st, "query_params", None)
+                if qp is not None:
+                    v = qp.get(key)
+                    if isinstance(v, list):
+                        return str(v[0]) if v else ""
+                    return str(v) if v is not None else ""
             except Exception:
-                try:
-                    v = st.experimental_get_query_params().get(k)
-                    return v[0] if v else None
-                except Exception:
-                    return None
+                pass
 
-        def _qp_set_one(k: str, v: str | None):
             try:
-                qp = st.query_params
-                if v is None or v == "":
-                    if k in qp:
-                        del qp[k]
-                else:
-                    qp[k] = v
+                # Старые версии: experimental_get_query_params
+                qp2 = st.experimental_get_query_params()
+                v = qp2.get(key, [])
+                return str(v[0]) if v else ""
             except Exception:
-                # legacy API
-                cur = {}
-                try:
-                    cur = st.experimental_get_query_params()
-                except Exception:
-                    cur = {}
-                if v is None or v == "":
-                    cur.pop(k, None)
-                else:
-                    cur[k] = v
-                try:
-                    st.experimental_set_query_params(**cur)
-                except Exception:
-                    pass
+                return ""
 
-        def _encode_view(order_list: list[str], hidden_list: list[str], picked_col: str | None) -> str:
-            payload = {"o": order_list, "h": hidden_list, "p": picked_col or ""}
-            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-            return _b64.urlsafe_b64encode(raw).decode("ascii")
-
-        def _decode_view(s: str):
+        def _qp_set(**kwargs):
+            """Безопасно пишем query params (старая/новая API)."""
             try:
-                raw = _b64.urlsafe_b64decode(s.encode("ascii"))
-                obj = json.loads(raw.decode("utf-8"))
-                order_list = obj.get("o") if isinstance(obj.get("o"), list) else None
-                hidden_list = obj.get("h") if isinstance(obj.get("h"), list) else None
-                picked_col = obj.get("p") if isinstance(obj.get("p"), str) else ""
-                return order_list, hidden_list, picked_col
+                qp = getattr(st, "query_params", None)
+                if qp is not None:
+                    for k, v in kwargs.items():
+                        qp[k] = v
+                    return
             except Exception:
-                return None, None, ""
+                pass
+            try:
+                st.experimental_set_query_params(**kwargs)
+            except Exception:
+                pass
 
-        view_blob = _qp_get_one("soldsku_view")
-        if view_blob and order_key not in st.session_state:
-            o, h, p = _decode_view(view_blob)
-            if o:
-                st.session_state[order_key] = [c for c in o if c in default_cols]
-            if h is not None:
-                st.session_state[hide_key] = [c for c in h if c in default_cols]
-            if p:
-                st.session_state[sel_key] = p
+        # 1) Пробуем подхватить сохранённый порядок/скрытые из URL (переживает F5)
+        qp_cols = _qp_get_one(qp_order_key).strip()
+        qp_hide = _qp_get_one(qp_hide_key).strip()
+        if qp_cols and (order_key not in st.session_state):
+            cols = [c for c in qp_cols.split(",") if c]
+            st.session_state[order_key] = cols
+        if qp_hide and (hide_key not in st.session_state):
+            hidden = [c for c in qp_hide.split(",") if c]
+            st.session_state[hide_key] = hidden
 
         if order_key not in st.session_state or not isinstance(st.session_state[order_key], list):
             st.session_state[order_key] = default_cols
@@ -2008,75 +1991,64 @@ with tab1:
         with st.expander("⚙️ Колонки таблицы", expanded=False):
             colA, colB, colC = st.columns([2.2, 1.2, 1.6])
 
-            cols_now = list(st.session_state.get(order_key, []))
-            if sel_key not in st.session_state:
-                st.session_state[sel_key] = cols_now[0] if cols_now else ""
-
-            # Поддержка "последней выбранной" колонки без повторного выбора
-            if "soldsku_col_picked" not in st.session_state and st.session_state[sel_key] in cols_now:
-                st.session_state["soldsku_col_picked"] = st.session_state[sel_key]
-
             with colA:
-                if cols_now:
-                    default_idx = cols_now.index(st.session_state[sel_key]) if st.session_state[sel_key] in cols_now else 0
-                    picked = st.selectbox(
-                        "Колонка",
-                        options=cols_now,
-                        index=default_idx,
-                        key="soldsku_col_picked",
-                    )
-                else:
-                    picked = ""
-                    st.info("Нет колонок для настройки")
+                # запоминаем последний выбранный столбец, чтобы после rerun не сбивалось
+                _last = st.session_state.get("soldsku_col_picked")
+                _idx = 0
+                try:
+                    if _last in st.session_state[order_key]:
+                        _idx = st.session_state[order_key].index(_last)
+                except Exception:
+                    _idx = 0
 
-                if picked:
-                    st.session_state[sel_key] = picked
+                picked = st.selectbox(
+                    "Колонка",
+                    options=st.session_state[order_key],
+                    index=_idx if st.session_state[order_key] else 0,
+                    key="soldsku_col_picked",
+                )
 
             with colB:
-                left = st.button("⬅️ Влево", key="btn_soldsku_left", use_container_width=True)
-                right = st.button("➡️ Вправо", key="btn_soldsku_right", use_container_width=True)
+                left = st.button("⬅️ Влево", use_container_width=True)
+                right = st.button("➡️ Вправо", use_container_width=True)
 
             with colC:
-                if st.button("↩️ Сбросить", key="btn_soldsku_reset", use_container_width=True):
-                    st.session_state[order_key] = list(default_cols)
-                    st.session_state[hide_key] = []
-                    st.session_state[sel_key] = default_cols[0] if default_cols else ""
-                    _qp_set_one(
-                        qp_param_name,
-                        _encode_view(st.session_state[order_key], st.session_state[hide_key], st.session_state[sel_key]),
-                    )
-                    st.rerun()
-
-            # Перемещение выбранной колонки
-            if picked and (left or right):
-                cols = list(st.session_state[order_key])
-                if picked in cols:
-                    i = cols.index(picked)
-                    j = i - 1 if left else i + 1
-                    if 0 <= j < len(cols):
-                        cols[i], cols[j] = cols[j], cols[i]
-                        st.session_state[order_key] = cols
-                        st.session_state[sel_key] = picked
-                        _qp_set_one(
-                            qp_param_name,
-                            _encode_view(st.session_state[order_key], st.session_state[hide_key], st.session_state[sel_key]),
-                        )
+                c1, c2 = st.columns([1.2, 1.0])
+                with c1:
+                    if st.button("💾 Сохранить", use_container_width=True):
+                        # сохраняем порядок/скрытые в URL (переживает F5)
+                        try:
+                            order_str = ",".join(st.session_state[order_key])
+                            hide_str = ",".join(st.session_state[hide_key])
+                            _qp_set({qp_order_key: order_str, qp_hide_key: hide_str})
+                            st.success("Сохранено")
+                        except Exception:
+                            st.warning("Не удалось сохранить в URL")
+                with c2:
+                    if st.button("↩️ Сбросить", use_container_width=True):
+                        st.session_state[order_key] = default_cols
+                        st.session_state[hide_key] = []
+                        try:
+                            _qp_set({qp_order_key: "", qp_hide_key: ""})
+                        except Exception:
+                            pass
                         st.rerun()
 
-            # Скрытие колонок
-            prev_hidden = list(st.session_state.get(hide_key, []))
-            hidden_now = st.multiselect(
+            if picked and (left or right):
+                cols = st.session_state[order_key]
+                i = cols.index(picked)
+                j = i - 1 if left else i + 1
+                if 0 <= j < len(cols):
+                    cols[i], cols[j] = cols[j], cols[i]
+                    st.session_state[order_key] = cols
+                    st.rerun()
+
+            st.session_state[hide_key] = st.multiselect(
                 "Скрыть колонки",
-                options=list(st.session_state.get(order_key, [])),
-                default=list(st.session_state.get(hide_key, [])),
+                options=st.session_state[order_key],
+                default=st.session_state[hide_key],
                 key="soldsku_col_hidden_ui",
             )
-            st.session_state[hide_key] = hidden_now
-            if hidden_now != prev_hidden:
-                _qp_set_one(
-                    qp_param_name,
-                    _encode_view(st.session_state[order_key], st.session_state[hide_key], st.session_state[sel_key]),
-                )
 
         visible_cols = [c for c in st.session_state[order_key] if c not in set(st.session_state[hide_key])]
         if visible_cols:
