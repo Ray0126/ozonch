@@ -1915,6 +1915,69 @@ with tab1:
         for c in pct_cols:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
+
+
+        # --- Настройка порядка/видимости колонок (простое решение без компонентов) ---
+        # Важно: в Streamlit нет drag&drop перестановки колонок в st.dataframe,
+        # поэтому делаем лёгкий UI: выбрать колонку и двигать вверх/вниз + скрывать.
+        default_cols = list(show.columns)
+        order_key = "soldsku_col_order"
+        hide_key = "soldsku_col_hidden"
+
+        if order_key not in st.session_state or not isinstance(st.session_state[order_key], list):
+            st.session_state[order_key] = default_cols
+        if hide_key not in st.session_state or not isinstance(st.session_state[hide_key], list):
+            st.session_state[hide_key] = []
+
+        # если появились/исчезли колонки — аккуратно синхронизируем
+        cur = [c for c in st.session_state[order_key] if c in default_cols]
+        for c in default_cols:
+            if c not in cur:
+                cur.append(c)
+        st.session_state[order_key] = cur
+        st.session_state[hide_key] = [c for c in st.session_state[hide_key] if c in default_cols]
+
+        with st.expander("⚙️ Колонки таблицы", expanded=False):
+            colA, colB, colC = st.columns([2.2, 1.2, 1.6])
+
+            with colA:
+                picked = st.selectbox(
+                    "Колонка",
+                    options=st.session_state[order_key],
+                    index=0 if st.session_state[order_key] else None,
+                    key="soldsku_col_picked",
+                )
+
+            with colB:
+                up = st.button("⬆️ Вверх", use_container_width=True)
+                down = st.button("⬇️ Вниз", use_container_width=True)
+
+            with colC:
+                if st.button("↩️ Сбросить", use_container_width=True):
+                    st.session_state[order_key] = default_cols
+                    st.session_state[hide_key] = []
+                    st.rerun()
+
+            if picked and (up or down):
+                cols = st.session_state[order_key]
+                i = cols.index(picked)
+                j = i - 1 if up else i + 1
+                if 0 <= j < len(cols):
+                    cols[i], cols[j] = cols[j], cols[i]
+                    st.session_state[order_key] = cols
+                    st.rerun()
+
+            st.session_state[hide_key] = st.multiselect(
+                "Скрыть колонки",
+                options=st.session_state[order_key],
+                default=st.session_state[hide_key],
+                key="soldsku_col_hidden_ui",
+            )
+
+        visible_cols = [c for c in st.session_state[order_key] if c not in set(st.session_state[hide_key])]
+        if visible_cols:
+            show = show[visible_cols]
+
         st.dataframe(
             show,
             use_container_width=True,
