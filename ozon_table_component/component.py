@@ -1,39 +1,46 @@
+from __future__ import annotations
+
+import streamlit as st
 import streamlit.components.v1 as components
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-_DIST_DIR = Path(__file__).parent / "frontend" / "dist"
+_BUILD_DIR = (Path(__file__).parent / "frontend" / "dist").resolve()
 
-_component = components.declare_component(
+# ВАЖНО: имя компонента (первый аргумент) должно совпадать всегда
+_ozon_table_component = components.declare_component(
     "ozon_table_component",
-    path=str(_DIST_DIR),
+    path=str(_BUILD_DIR),
 )
 
 def ozon_table(
-    df=None,
-    data=None,
-    columns=None,
-    state=None,
-    key=None,
-    height=520,
-    **kwargs,
-):
-    # если передали df — конвертим в records
-    if df is not None and data is None:
-        data = df.to_dict("records")
-        if columns is None:
-            columns = list(df.columns)
+    *,
+    data: List[Dict[str, Any]],
+    columns: List[str],
+    state: Optional[Dict[str, Any]] = None,
+    height: int = 520,
+    key: str = "ozon_table_component",
+) -> Dict[str, Any]:
+    # Если dist не на месте — не падаем всем приложением
+    if not (_BUILD_DIR / "index.html").exists():
+        st.warning("Компонент таблицы не собран: нет frontend/dist/index.html. Показываю обычную таблицу.")
+        st.dataframe(data, use_container_width=True, height=height)
+        return state or {}
 
-    if data is None:
-        data = []
-    if columns is None:
-        columns = []
+    payload = {
+        "data": data if data is not None else [],
+        "columns": columns if columns is not None else [],
+        "state": state or {},
+    }
 
-    return _component(
-        data=data,
-        columns=columns,
-        state=state or {},
-        height=height,
+    result = _ozon_table_component(
+        **payload,
+        default=state or {},
         key=key,
-        default=None,
-        **kwargs,
+        height=height,
     )
+
+    # Streamlit иногда может вернуть None при первом рендере
+    if result is None:
+        return state or {}
+    return result
