@@ -1,50 +1,23 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Ozon Table</title>
+  <link rel="stylesheet" href="https://unpkg.com/tabulator-tables@6.2.1/dist/css/tabulator.min.css" />
   <style>
-    :root { --border: rgba(0,0,0,.12); --muted: rgba(0,0,0,.06); --text: rgba(0,0,0,.88); }
-    body { margin: 0; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial; color: var(--text); }
-    .bar { display:flex; gap:8px; align-items:center; padding:8px; border-bottom:1px solid var(--border); background:#fff; position:sticky; top:0; z-index:3; }
-    .bar input { flex:1; padding:6px 8px; border:1px solid var(--border); border-radius:8px; }
-    .btn { padding:6px 10px; border:1px solid var(--border); border-radius:10px; background:#fff; cursor:pointer; }
-    .btn:active { transform: translateY(1px); }
-    .panel { display:none; position:absolute; right:8px; top:44px; background:#fff; border:1px solid var(--border); border-radius:12px; padding:10px; max-height:320px; overflow:auto; z-index:5; box-shadow: 0 8px 24px rgba(0,0,0,.08); }
-    .panel.open { display:block; }
-    .tableWrap { overflow:auto; }
-    table { width:100%; border-collapse:separate; border-spacing:0; }
-    thead th { position:sticky; top:44px; background:#fff; z-index:2; }
-    th, td { border-bottom:1px solid var(--muted); padding:8px 10px; font-size:13px; white-space:nowrap; }
-    th { border-bottom:1px solid var(--border); user-select:none; }
-    th .h { display:flex; gap:6px; align-items:center; }
-    th[draggable="true"] { cursor: grab; }
-    th.dragging { opacity:.4; }
-    th.dropTarget { outline:2px dashed rgba(0,0,0,.25); outline-offset:-2px; }
-    tr:nth-child(even) td { background:rgba(0,0,0,.015); }
-    .filters { display:none; border-bottom:1px solid var(--border); }
-    .filters.open { display:table-row; }
-    .filters td { background:#fff; padding:6px 10px; }
-    .filters input { width:100%; padding:6px 8px; border:1px solid var(--border); border-radius:8px; font-size:12px; }
-    .muted { color: rgba(0,0,0,.55); font-size:12px; }
+    html, body { margin: 0; padding: 0; }
+    #root { width: 100%; }
+    .tabulator { border: none; }
+    .tabulator .tabulator-header { border-bottom: 1px solid rgba(0,0,0,0.08); }
+    .tabulator .tabulator-row { border-bottom: 1px solid rgba(0,0,0,0.06); }
+    .tabulator-row .tabulator-cell { border-right: 1px solid rgba(0,0,0,0.04); }
   </style>
 </head>
 <body>
-  <div class="bar">
-    <input id="global" placeholder="Поиск…" />
-    <button class="btn" id="btnFilters">Фильтры</button>
-    <button class="btn" id="btnCols">Колонки</button>
-    <button class="btn" id="btnSave">💾</button>
-    <button class="btn" id="btnReset">↩</button>
-    <div id="colsPanel" class="panel"></div>
-  </div>
-  <div class="tableWrap">
-    <table id="tbl">
-      <thead id="thead"></thead>
-      <tbody id="tbody"></tbody>
-    </table>
-  </div>
+  <div id="root"></div>
+  <script src="https://unpkg.com/streamlit-component-lib@1.5.0/dist/index.js"></script>
+  <script src="https://unpkg.com/tabulator-tables@6.2.1/dist/js/tabulator.min.js"></script>
   <script src="./main.js"></script>
 </body>
 </html>
