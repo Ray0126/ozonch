@@ -1980,78 +1980,183 @@ with tab1:
         for c in pct_cols:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
-        # --- Настройка колонок (порядок/скрытие) ---
+        # --- Гибрид: лёгкие фильтры + простая настройка колонок + (опционально) интерактивная таблица ---
         prefs = _prefs_load()
-        pref_key = "soldsku_table"
+        
+        pref_key = "soldsku_table_v2"
         cfg = prefs.get(pref_key, {}) if isinstance(prefs.get(pref_key, {}), dict) else {}
+        saved_visible = cfg.get("visible", []) if isinstance(cfg.get("visible", []), list) else []
+        saved_order = cfg.get("order", []) if isinstance(cfg.get("order", []), list) else []
+        saved_mode = str(cfg.get("mode", "Лёгкая"))
 
-        # восстанавливаем: какие колонки показывать и их порядок
-        show_flags = cfg.get("show", {}) if isinstance(cfg.get("show", {}), dict) else {}
-        order_map = cfg.get("order", {}) if isinstance(cfg.get("order", {}), dict) else {}
+        # дефолт
+        default_visible = cols[:]
+        default_order = cols[:]
 
-        with st.expander("Настроить таблицу (колонки)", expanded=False):
-            cfg_df = pd.DataFrame({
-                "Показывать": [bool(show_flags.get(c, True)) for c in cols],
-                "Порядок": [int(order_map.get(c, i+1)) for i, c in enumerate(cols)],
-                "Колонка": cols,
-            })
+        # восстанавливаем (только существующие колонки)
+        visible_cols = [c for c in (saved_visible or default_visible) if c in cols]
+        if not visible_cols:
+            visible_cols = default_visible[:]
+        order_cols = [c for c in (saved_order or default_order) if c in cols]
+        # добавляем новые, если появились
+        order_cols = order_cols + [c for c in cols if c not in order_cols]
+        
+        # быстрые фильтры
+        with st.expander("Фильтры (быстро)", expanded=False):
+            f1, f2, f3, f4 = st.columns([2.2, 1.2, 1.2, 1.2])
+            with f1:
+                q = st.text_input("Поиск (артикул / SKU / название)", value=str(cfg.get("q", "")), key="soldsku_q")
+            with f2:
+                min_rev = st.number_input("Мин. выручка, ₽", min_value=0.0, value=float(cfg.get("min_rev", 0.0) or 0.0), step=100.0, key="soldsku_min_rev")
+            with f3:
+                min_profit = st.number_input("Мин. прибыль, ₽", value=float(cfg.get("min_profit", 0.0) or 0.0), step=100.0, key="soldsku_min_profit")
+            with f4:
+                only_pos = st.checkbox("Только прибыльные", value=bool(cfg.get("only_pos", False)), key="soldsku_only_pos")
 
-            cfg_edit = st.data_editor(
-                cfg_df,
-                hide_index=True,
-                use_container_width=True,
-                num_rows="fixed",
-                column_config={
-                    "Показывать": st.column_config.CheckboxColumn(width="small"),
-                    "Порядок": st.column_config.NumberColumn(width="small", step=1, min_value=1),
-                    "Колонка": st.column_config.TextColumn(disabled=True),
-                },
-                key="soldsku_cols_editor",
-            )
+            if st.button("Сохранить фильтры", use_container_width=False, key="soldsku_save_filters"):
+                prefs = _prefs_load()
+                cfg2 = prefs.get(pref_key, {}) if isinstance(prefs.get(pref_key, {}), dict) else {}
+                cfg2.update({"q": q, "min_rev": float(min_rev), "min_profit": float(min_profit), "only_pos": bool(only_pos)})
+                prefs[pref_key] = cfg2
+                _prefs_save(prefs)
+                st.success("Фильтры сохранены")
 
-            csave, cres = st.columns([1.2, 1.2])
-            with csave:
-                if st.button("Сохранить колонки", use_container_width=True, key="soldsku_cols_save"):
-                    new_show = {r["Колонка"]: bool(r["Показывать"]) for _, r in cfg_edit.iterrows()}
-                    new_order = {r["Колонка"]: int(r["Порядок"]) for _, r in cfg_edit.iterrows()}
-                    prefs[pref_key] = {"show": new_show, "order": new_order}
+        show2 = show.copy()
+        try:
+            if q:
+                qq = str(q).strip().lower()
+                mask = (
+                    show2["Артикул"].astype(str).str.lower().str.contains(qq, na=False)
+                    | show2["SKU"].astype(str).str.lower().str.contains(qq, na=False)
+                    | show2["Название"].astype(str).str.lower().str.contains(qq, na=False)
+                )
+                show2 = show2[mask].copy()
+        except Exception:
+            pass
+        try:
+            show2 = show2[show2["Выручка, ₽"] >= float(min_rev)].copy()
+        except Exception:
+            pass
+        try:
+            show2 = show2[show2["Прибыль, ₽"] >= float(min_profit)].copy()
+        except Exception:
+            pass
+        if only_pos:
+            try:
+                show2 = show2[show2["Прибыль, ₽"] > 0].copy()
+            except Exception:
+                pass
+
+        # настройка колонок (лёгкая)
+        with st.expander("Колонки (порядок / скрыть)", expanded=False):
+            st.caption("Это упрощённый вариант. Если нужен drag&drop — включи режим 'Грид'.")
+            c1, c2 = st.columns([1.2, 1.2])
+            with c1:
+                mode = st.radio("Вид таблицы", options=["Лёгкая", "Грид"], index=0 if saved_mode == "Лёгкая" else 1, horizontal=True, key="soldsku_mode")
+            with c2:
+                if st.button("Сбросить настройки", use_container_width=True, key="soldsku_reset_v2"):
+                    prefs = _prefs_load()
+                    prefs.pop(pref_key, None)
                     _prefs_save(prefs)
-                    st.success("Сохранено")
-                    st.rerun()
-            with cres:
-                if st.button("Сбросить колонки", use_container_width=True, key="soldsku_cols_reset"):
-                    if pref_key in prefs:
-                        prefs.pop(pref_key, None)
-                        _prefs_save(prefs)
                     st.success("Сброшено")
                     st.rerun()
 
-        # применяем настройки
-        cols_visible = [c for c in cols if bool(show_flags.get(c, True))]
-        # сортируем по "Порядок", а неизвестные — в конец
-        cols_visible = sorted(cols_visible, key=lambda c: int(order_map.get(c, 10_000)))
-        # гарантируем что обязательные колонки не пропали
+            visible_sel = st.multiselect(
+                "Какие колонки показывать",
+                options=cols,
+                default=visible_cols,
+                key="soldsku_visible_sel",
+            )
+            order_sel = st.multiselect(
+                "Порядок колонок (кликни в нужной последовательности)",
+                options=cols,
+                default=order_cols,
+                key="soldsku_order_sel",
+            )
+
+            if st.button("Сохранить настройки таблицы", use_container_width=True, key="soldsku_save_v2"):
+                prefs = _prefs_load()
+                cfg2 = prefs.get(pref_key, {}) if isinstance(prefs.get(pref_key, {}), dict) else {}
+                cfg2.update({
+                    "visible": list(visible_sel),
+                    "order": list(order_sel),
+                    "mode": mode,
+                    "q": q,
+                    "min_rev": float(min_rev),
+                    "min_profit": float(min_profit),
+                    "only_pos": bool(only_pos),
+                })
+                prefs[pref_key] = cfg2
+                _prefs_save(prefs)
+                st.success("Сохранено")
+                st.rerun()
+
+        # применяем порядок/видимость
+        visible_sel = [c for c in (st.session_state.get("soldsku_visible_sel") or visible_cols) if c in cols]
+        order_sel = [c for c in (st.session_state.get("soldsku_order_sel") or order_cols) if c in cols]
+        order_sel = order_sel + [c for c in cols if c not in order_sel]
+
+        # обязательные колонки
         for must in ["Артикул", "SKU", "Название"]:
-            if must in cols and must not in cols_visible:
-                cols_visible.insert(0, must)
+            if must not in visible_sel and must in cols:
+                visible_sel = [must] + visible_sel
+        
+        final_cols = [c for c in order_sel if c in visible_sel]
+        if final_cols:
+            show2 = show2[final_cols].copy()
 
-        show = show[cols_visible].copy()
+        # рендер: лёгкая или грид
+        mode_now = st.session_state.get("soldsku_mode", saved_mode)
+        if mode_now == "Грид":
+            try:
+                from st_aggrid import AgGrid, GridOptionsBuilder  # type: ignore
 
-        st.dataframe(
-            show,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
-                "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
-                "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
-                **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols},
-                "% выкупа": st.column_config.NumberColumn(format="%.1f"),
-                "DRR, %": st.column_config.NumberColumn(format="%.1f"),
-                "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
-                "ROI, %": st.column_config.NumberColumn(format="%.1f"),
-            }
-        )
+                gb = GridOptionsBuilder.from_dataframe(show2)
+                gb.configure_default_column(
+                    sortable=True,
+                    filter=True,
+                    resizable=True,
+                    minWidth=90,
+                )
+                gb.configure_grid_options(
+                    enableRangeSelection=True,
+                    suppressDragLeaveHidesColumns=False,
+                    rowSelection="multiple",
+                )
+                grid_opts = gb.build()
+
+                AgGrid(
+                    show2,
+                    gridOptions=grid_opts,
+                    height=520,
+                    fit_columns_on_grid_load=False,
+                    allow_unsafe_jscode=True,
+                    enable_enterprise_modules=False,
+                    theme="streamlit",
+                )
+            except Exception:
+                st.info("Режим 'Грид' недоступен (пакет streamlit-aggrid не установлен). Показываю обычную таблицу.")
+                mode_now = "Лёгкая"
+
+        if mode_now == "Лёгкая":
+            st.dataframe(
+                show2,
+                use_container_width=True,
+                hide_index=True,
+                column_config={
+                    "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
+                    "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
+                    "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
+                    **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols if c in show2.columns},
+                    "% выкупа": st.column_config.NumberColumn(format="%.1f"),
+                    "DRR, %": st.column_config.NumberColumn(format="%.1f"),
+                    "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
+                    "ROI, %": st.column_config.NumberColumn(format="%.1f"),
+                }
+            )
+
+        # для экспорта лучше сохранять то, что видишь
+        show = show2
 
         st.download_button(
             "Скачать XLSX (таблица проданных SKU)",
