@@ -2,91 +2,44 @@ import os
 import io
 import time
 import json
-import sys
-from pathlib import Path
-from datetime import date, timedelta, datetime
-
 import requests
 import streamlit as st
 import pandas as pd
+from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
-
-# ================== CONFIG (важно: первое streamlit-действие) ==================
-st.set_page_config(
-    layout="wide",
-    page_title="Оцифровка Ozon",
-    initial_sidebar_state="collapsed",
-)
-
-BASE_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE_DIR / "src"))
-
-
-def resource_path(rel: str) -> str:
-    # при запуске в exe: файлы лежат в _MEIPASS
-    if hasattr(sys, "_MEIPASS"):
-        return str(Path(sys._MEIPASS) / rel)
-    # при обычном запуске: рядом с app.py
-    return str(Path(__file__).resolve().parent / rel)
-
-
-def _get_setting(name: str, default: str = "") -> str:
-    """Берём значение из:
-    1) переменных окружения
-    2) Streamlit secrets (для Streamlit Cloud)
-    3) default
-    """
-    v = os.getenv(name)
-    if v is not None and str(v).strip() != "":
-        return str(v).strip()
-    try:
-        if hasattr(st, "secrets") and name in st.secrets:
-            return str(st.secrets.get(name)).strip()
-    except Exception:
-        pass
-    return default
-
-
-# Локальная разработка/EXE: можно держать .env рядом, но в облаке его не будет.
-try:
-    load_dotenv(resource_path(".env"), override=False)
-except Exception:
-    pass
-
-
-from ozon_client import OzonSellerClient, last_closed_month, OzonAPIError
-
+import sys
+from pathlib import Path
 
 # ================== AUTH ==================
-APP_PASSWORD = _get_setting("APP_PASSWORD", "").strip()
+APP_PASSWORD = os.getenv("APP_PASSWORD")
 
 if "auth_ok" not in st.session_state:
     st.session_state.auth_ok = False
 
-if APP_PASSWORD and not st.session_state.auth_ok:
+if not st.session_state.auth_ok:
     st.markdown(
         """
         <style>
         .auth-banner {
             max-width: 520px;
-            margin: 70px auto 18px;
-            padding: 18px 22px;
-            border-radius: 14px;
+            margin: 60px auto 18px;
+            padding: 16px 22px;
+            border-radius: 12px;
             background: #1f1f24;
             box-shadow: 0 0 30px rgba(0,0,0,0.35);
             text-align: center;
             font-weight: 700;
-            font-size: 22px;
+            font-size: 20px;
             color: #ffffff;
         }
         .auth-box {
             max-width: 520px;
             margin: 0 auto 80px;
-            padding: 28px;
-            border-radius: 14px;
+            padding: 26px 26px 18px;
+            border-radius: 12px;
             background: #ffffff;
-            box-shadow: 0 0 30px rgba(0,0,0,0.10);
-            border: 1px solid rgba(0,0,0,0.06);
+            border: 1px solid rgba(49, 51, 63, 0.18);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
         }
         </style>
         """,
@@ -95,12 +48,17 @@ if APP_PASSWORD and not st.session_state.auth_ok:
 
     st.markdown('<div class="auth-banner">Оцифровка по Ozon</div>', unsafe_allow_html=True)
 
+    # Карточка логина в "старом" (лёгком) стиле
     with st.container():
         st.markdown('<div class="auth-box">', unsafe_allow_html=True)
         st.markdown("## 🔐 Вход в приложение")
 
         with st.form("login_form"):
-            pwd = st.text_input("Пароль", type="password", placeholder="Введите пароль")
+            pwd = st.text_input(
+                "Пароль",
+                type="password",
+                placeholder="Введите пароль",
+            )
             submitted = st.form_submit_button("Войти")
 
         if submitted:
@@ -115,38 +73,41 @@ if APP_PASSWORD and not st.session_state.auth_ok:
     st.stop()
 
 
+BASE_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE_DIR / "src"))
+
+from ozon_client import OzonSellerClient, last_closed_month, OzonAPIError
+
 # ================== FRIENDLY API ERROR UI ==================
 
 def _humanize_ozon_error(exc: Exception) -> tuple[str, str]:
     """Возвращает (заголовок, детали) для отображения в UI."""
     if isinstance(exc, OzonAPIError):
         sc = exc.status_code
+        # типовые причины
         if sc in (401, 403):
             title = "Ozon API: нет доступа (401/403)"
             details = (
-                f"Запрос: {exc.path}"
-                "Проверь Client-Id / Api-Key (Streamlit secrets) и доступы ключа."
+                f"Запрос: {exc.path}\n"
+                "Проверь Client-Id / Api-Key (Streamlit secrets) и доступы ключа.\n\n"
                 f"Ответ: {exc.body}"
             )
             return title, details
         if sc == 429:
             title = "Ozon API: лимит запросов (429)"
             details = (
-                f"Запрос: {exc.path}"
-                "Ozon вернул ограничение по частоте. Подожди 30–60 секунд и нажми «Повторить»."
+                f"Запрос: {exc.path}\n"
+                "Ozon вернул ограничение по частоте. Подожди 30–60 секунд и нажми «Повторить».\n\n"
                 f"Ответ: {exc.body}"
             )
             return title, details
         if sc >= 500:
             title = "Ozon API: временная ошибка сервера (5xx)"
-            details = f"Запрос: {exc.path}"
-
-Ответ: {exc.body}"
+            details = f"Запрос: {exc.path}\n\nОтвет: {exc.body}"
             return title, details
-        return f"Ozon API error ({sc})", f"Запрос: {exc.path}"
+        return f"Ozon API error ({sc})", f"Запрос: {exc.path}\n\nОтвет: {exc.body}"
 
-Ответ: {exc.body}"
-
+    # прочие ошибки сети/таймауты
     if isinstance(exc, requests.exceptions.Timeout):
         return "Ozon API: таймаут", str(exc)
     if isinstance(exc, requests.exceptions.RequestException):
@@ -176,14 +137,63 @@ def _block_with_retry(title: str, details: str, cache_clear_fn=None):
     st.stop()
 
 
-# ================== Ozon Seller API ==================
+# ================== CONFIG ==================
+st.set_page_config(
+    layout="wide",
+    page_title="Оцифровка Ozon",
+    initial_sidebar_state="collapsed",
+)
+import sys
+from pathlib import Path
+
+def resource_path(rel: str) -> str:
+    # при запуске в exe: файлы лежат в _MEIPASS
+    if hasattr(sys, "_MEIPASS"):
+        return str(Path(sys._MEIPASS) / rel)
+    # при обычном запуске: рядом с app.py
+    return str(Path(__file__).resolve().parent / rel)
+
+def _get_setting(name: str, default: str = "") -> str:
+    """Берём значение из:
+    1) переменных окружения
+    2) Streamlit secrets (для Streamlit Cloud)
+    3) default
+    """
+    v = os.getenv(name)
+    if v is not None and str(v).strip() != "":
+        return str(v).strip()
+    try:
+        # st.secrets может отсутствовать локально/в exe
+        if hasattr(st, "secrets") and name in st.secrets:
+            return str(st.secrets.get(name)).strip()
+    except Exception:
+        pass
+    return default
+
+# Локальная разработка/EXE: можно держать .env рядом, но в облаке его не будет.
+try:
+    load_dotenv(resource_path(".env"), override=False)
+except Exception:
+    pass
+
+# --- Мини-авторизация по паролю (если APP_PASSWORD задан) ---
+APP_PASSWORD = _get_setting("APP_PASSWORD", "").strip()
+if APP_PASSWORD:
+    if not st.session_state.get("auth_ok"):
+        with st.sidebar:
+            st.markdown("### Доступ")
+            pw = st.text_input("Пароль", type="password", key="app_password_input")
+            if pw and pw == APP_PASSWORD:
+                st.session_state["auth_ok"] = True
+                st.rerun()
+        st.stop()
+
+# --- Ozon Seller API ---
 client_id = _get_setting("OZON_CLIENT_ID", "")
 api_key = _get_setting("OZON_API_KEY", "")
 if not client_id or not api_key:
-    _block_with_retry(
-        "Не заданы ключи Ozon API",
-        "Добавь OZON_CLIENT_ID и OZON_API_KEY в Streamlit secrets (или в .env локально).",
-    )
+    st.error("Нет OZON_CLIENT_ID / OZON_API_KEY (переменные окружения или Streamlit secrets).")
+    st.stop()
 
 client = OzonSellerClient(client_id, api_key)
 
