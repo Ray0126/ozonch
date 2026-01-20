@@ -18,7 +18,7 @@ if "auth_ok" not in st.session_state:
 
 if not st.session_state.auth_ok:
     st.markdown(
-        """
+        r"""
         <style>
         .auth-banner {
             max-width: 420px;
@@ -32,15 +32,17 @@ if not st.session_state.auth_ok:
             font-size: 20px;
             color: #ffffff;
         }
-
-        /* стилизуем сам Streamlit Form как "бокс" */
+        /* Когда мы на экране логина — единственная форма на странице, можно стилизовать stForm */
         div[data-testid="stForm"] {
             max-width: 420px;
             margin: 0 auto 80px;
-            padding: 30px;
+            padding: 22px 22px 18px;
             border-radius: 12px;
             background: #1f1f24;
             box-shadow: 0 0 30px rgba(0,0,0,0.4);
+        }
+        div[data-testid="stForm"] h2, div[data-testid="stForm"] label, div[data-testid="stForm"] p, div[data-testid="stForm"] span {
+            color: #ffffff;
         }
         </style>
         """,
@@ -48,18 +50,24 @@ if not st.session_state.auth_ok:
     )
 
     st.markdown('<div class="auth-banner">Оцифровка по Ozon</div>', unsafe_allow_html=True)
-    st.markdown("## 🔐 Вход в приложение")
 
-    with st.form("login_form"):
-        pwd = st.text_input("Пароль", type="password", placeholder="Введите пароль")
-        submitted = st.form_submit_button("Войти")
+    with st.container():
+        st.markdown("## 🔐 Вход в приложение")
 
-    if submitted:
-        if pwd == APP_PASSWORD:
-            st.session_state.auth_ok = True
-            st.rerun()
-        else:
-            st.error("Неверный пароль")
+        with st.form("login_form"):
+            pwd = st.text_input(
+                "Пароль",
+                type="password",
+                placeholder="Введите пароль",
+            )
+            submitted = st.form_submit_button("Войти")
+
+        if submitted:
+            if pwd == APP_PASSWORD:
+                st.session_state.auth_ok = True
+                st.rerun()
+            else:
+                st.error("Неверный пароль")
 
     st.stop()
 
