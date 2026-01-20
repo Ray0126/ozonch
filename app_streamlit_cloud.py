@@ -21,7 +21,7 @@ if not st.session_state.auth_ok:
         """
         <style>
         .auth-banner {
-            max-width: 420px;
+	            max-width: 520px;
             margin: 60px auto 18px;
             padding: 16px 22px;
             border-radius: 12px;
@@ -32,16 +32,24 @@ if not st.session_state.auth_ok:
             font-size: 20px;
             color: #ffffff;
         }
-        .auth-box {
-            max-width: 420px;
-            margin: 0 auto 80px;
-            padding: 30px;
-            border-radius: 12px;
-            background: #1f1f24;
-            box-shadow: 0 0 30px rgba(0,0,0,0.4);
-        }
-        /* ВАЖНО: прячем любые лишние пустые блоки, которые могли остаться в DOM */
-        .auth-spacer { display:none !important; }
+	        /*
+	        Вместо "сырого" <div class="auth-box"> (который в Streamlit может давать
+	        лишний пустой прямоугольник из‑за разбиения DOM по виджетам)
+	        стилизуем сам контейнер формы.
+	        */
+	        div[data-testid="stForm"] {
+	            max-width: 520px;
+	            margin: 0 auto 80px;
+	            padding: 26px 26px 18px;
+	            border-radius: 12px;
+	            background: #ffffff;
+	            border: 1px solid rgba(49, 51, 63, 0.18);
+	            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+	        }
+	        /* Чуть поджимаем заголовок внутри формы */
+	        div[data-testid="stForm"] h2 { margin-top: 0.2rem; }
+	        /* Убираем возможные пустые HTML‑вставки */
+	        .auth-spacer, .auth-box { display:none !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -49,7 +57,6 @@ if not st.session_state.auth_ok:
 
     st.markdown('<div class="auth-banner">Оцифровка по Ozon</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="auth-box">', unsafe_allow_html=True)
     st.markdown("## 🔐 Вход в приложение")
 
     with st.form("login_form", clear_on_submit=False):
@@ -63,7 +70,6 @@ if not st.session_state.auth_ok:
         else:
             st.error("Неверный пароль")
 
-    st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
 
 
