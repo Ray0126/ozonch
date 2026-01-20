@@ -174,17 +174,6 @@ try:
 except Exception:
     pass
 
-# --- Мини-авторизация по паролю (если APP_PASSWORD задан) ---
-APP_PASSWORD = _get_setting("APP_PASSWORD", "").strip()
-if APP_PASSWORD:
-    if not st.session_state.get("auth_ok"):
-        with st.sidebar:
-            st.markdown("### Доступ")
-            pw = st.text_input("Пароль", type="password", key="app_password_input")
-            if pw and pw == APP_PASSWORD:
-                st.session_state["auth_ok"] = True
-                st.rerun()
-        st.stop()
 
 # --- Ozon Seller API ---
 client_id = _get_setting("OZON_CLIENT_ID", "")
