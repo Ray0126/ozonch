@@ -124,22 +124,16 @@ def _humanize_ozon_error(exc: Exception) -> tuple[str, str]:
         if sc in (401, 403):
             title = "Ozon API: нет доступа (401/403)"
             details = (
-                f"Запрос: {exc.path}
-"
-                "Проверь Client-Id / Api-Key (Streamlit secrets) и доступы ключа.
-
-"
+                f"Запрос: {exc.path}"
+                "Проверь Client-Id / Api-Key (Streamlit secrets) и доступы ключа."
                 f"Ответ: {exc.body}"
             )
             return title, details
         if sc == 429:
             title = "Ozon API: лимит запросов (429)"
             details = (
-                f"Запрос: {exc.path}
-"
-                "Ozon вернул ограничение по частоте. Подожди 30–60 секунд и нажми «Повторить».
-
-"
+                f"Запрос: {exc.path}"
+                "Ozon вернул ограничение по частоте. Подожди 30–60 секунд и нажми «Повторить»."
                 f"Ответ: {exc.body}"
             )
             return title, details
