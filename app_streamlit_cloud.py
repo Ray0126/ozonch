@@ -32,7 +32,9 @@ if not st.session_state.auth_ok:
             font-size: 20px;
             color: #ffffff;
         }
-        .auth-box {
+
+        /* стилизуем сам Streamlit Form как "бокс" */
+        div[data-testid="stForm"] {
             max-width: 420px;
             margin: 0 auto 80px;
             padding: 30px;
@@ -46,27 +48,18 @@ if not st.session_state.auth_ok:
     )
 
     st.markdown('<div class="auth-banner">Оцифровка по Ozon</div>', unsafe_allow_html=True)
+    st.markdown("## 🔐 Вход в приложение")
 
-    with st.container():
-        st.markdown('<div class="auth-box">', unsafe_allow_html=True)
-        st.markdown("## 🔐 Вход в приложение")
+    with st.form("login_form"):
+        pwd = st.text_input("Пароль", type="password", placeholder="Введите пароль")
+        submitted = st.form_submit_button("Войти")
 
-        with st.form("login_form"):
-            pwd = st.text_input(
-                "Пароль",
-                type="password",
-                placeholder="Введите пароль",
-            )
-            submitted = st.form_submit_button("Войти")
-
-        if submitted:
-            if pwd == APP_PASSWORD:
-                st.session_state.auth_ok = True
-                st.rerun()
-            else:
-                st.error("Неверный пароль")
-
-        st.markdown("</div>", unsafe_allow_html=True)
+    if submitted:
+        if pwd == APP_PASSWORD:
+            st.session_state.auth_ok = True
+            st.rerun()
+        else:
+            st.error("Неверный пароль")
 
     st.stop()
 
