@@ -46,6 +46,8 @@ if not st.session_state.auth_ok:
 	            border: 1px solid rgba(49, 51, 63, 0.18);
 	            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
 	        }
+	        /* Чуть поджимаем заголовок внутри формы */
+	        div[data-testid="stForm"] h2 { margin-top: 0.2rem; }
 	        /* Убираем возможные пустые HTML‑вставки */
 	        .auth-spacer, .auth-box { display:none !important; }
         </style>
