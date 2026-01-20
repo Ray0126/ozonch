@@ -21,7 +21,7 @@ if not st.session_state.auth_ok:
         """
         <style>
         .auth-banner {
-            max-width: 520px;
+            max-width: 420px;
             margin: 60px auto 18px;
             padding: 16px 22px;
             border-radius: 12px;
@@ -33,13 +33,12 @@ if not st.session_state.auth_ok:
             color: #ffffff;
         }
         .auth-box {
-            max-width: 520px;
+            max-width: 420px;
             margin: 0 auto 80px;
-            padding: 26px 26px 18px;
+            padding: 30px;
             border-radius: 12px;
-            background: #ffffff;
-            border: 1px solid rgba(49, 51, 63, 0.18);
-            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+            background: #1f1f24;
+            box-shadow: 0 0 30px rgba(0,0,0,0.4);
         }
         </style>
         """,
@@ -48,7 +47,6 @@ if not st.session_state.auth_ok:
 
     st.markdown('<div class="auth-banner">Оцифровка по Ozon</div>', unsafe_allow_html=True)
 
-    # Карточка логина в "старом" (лёгком) стиле
     with st.container():
         st.markdown('<div class="auth-box">', unsafe_allow_html=True)
         st.markdown("## 🔐 Вход в приложение")
