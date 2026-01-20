@@ -40,6 +40,8 @@ if not st.session_state.auth_ok:
             background: #1f1f24;
             box-shadow: 0 0 30px rgba(0,0,0,0.4);
         }
+        /* ВАЖНО: прячем любые лишние пустые блоки, которые могли остаться в DOM */
+        .auth-spacer { display:none !important; }
         </style>
         """,
         unsafe_allow_html=True,
@@ -47,28 +49,23 @@ if not st.session_state.auth_ok:
 
     st.markdown('<div class="auth-banner">Оцифровка по Ozon</div>', unsafe_allow_html=True)
 
-    with st.container():
-        st.markdown('<div class="auth-box">', unsafe_allow_html=True)
-        st.markdown("## 🔐 Вход в приложение")
+    st.markdown('<div class="auth-box">', unsafe_allow_html=True)
+    st.markdown("## 🔐 Вход в приложение")
 
-        with st.form("login_form"):
-            pwd = st.text_input(
-                "Пароль",
-                type="password",
-                placeholder="Введите пароль",
-            )
-            submitted = st.form_submit_button("Войти")
+    with st.form("login_form", clear_on_submit=False):
+        pwd = st.text_input("Пароль", type="password", placeholder="Введите пароль")
+        submitted = st.form_submit_button("Войти")
 
-        if submitted:
-            if pwd == APP_PASSWORD:
-                st.session_state.auth_ok = True
-                st.rerun()
-            else:
-                st.error("Неверный пароль")
+    if submitted:
+        if pwd == APP_PASSWORD:
+            st.session_state.auth_ok = True
+            st.rerun()
+        else:
+            st.error("Неверный пароль")
 
-        st.markdown("</div>", unsafe_allow_html=True)
-
+    st.markdown("</div>", unsafe_allow_html=True)
     st.stop()
+
 
 
 BASE_DIR = Path(__file__).resolve().parent
