@@ -139,11 +139,11 @@ def _humanize_ozon_error(exc: Exception) -> tuple[str, str]:
             return title, details
         if sc >= 500:
             title = "Ozon API: временная ошибка сервера (5xx)"
-            details = f"Запрос: {exc.path}
+            details = f"Запрос: {exc.path}"
 
 Ответ: {exc.body}"
             return title, details
-        return f"Ozon API error ({sc})", f"Запрос: {exc.path}
+        return f"Ozon API error ({sc})", f"Запрос: {exc.path}"
 
 Ответ: {exc.body}"
 
