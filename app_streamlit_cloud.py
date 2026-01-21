@@ -950,7 +950,7 @@ uploaded = st.sidebar.file_uploader(
 
 # --- ДИАГНОСТИКА SUPABASE (временно) ---
 if USE_SUPABASE:
-    st.sidebar.write("SUPABASE ON ✅")
+    st.sidebar.write("✅")
 else:
     st.sidebar.write("SUPABASE OFF ❌ (нет SUPABASE_URL или SUPABASE_SERVICE_ROLE_KEY)")
 
