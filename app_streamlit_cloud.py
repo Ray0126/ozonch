@@ -17,7 +17,6 @@ if "auth_ok" not in st.session_state:
     st.session_state.auth_ok = False
 
 if not st.session_state.auth_ok:
-    # Стили: баннер + оформление самой формы (без "пустых прямоугольников")
     st.markdown(
         """
         <style>
@@ -26,49 +25,56 @@ if not st.session_state.auth_ok:
             margin: 60px auto 18px;
             padding: 16px 22px;
             border-radius: 12px;
-            background: #1f1f24;
-            box-shadow: 0 0 30px rgba(0,0,0,0.35);
+
+            background: var(--secondary-background-color);
+            color: var(--text-color);
+
+            box-shadow: 0 10px 30px rgba(0,0,0,0.15);
             text-align: center;
             font-weight: 700;
             font-size: 20px;
-            color: #ffffff;
         }
-        /* Стилизуем именно Streamlit FORM — он реально оборачивает виджеты */
+
+        /* СТИЛИЗУЕМ САМ st.form — ЭТО ВАЖНО */
         div[data-testid="stForm"] {
             max-width: 520px;
             margin: 0 auto 80px;
             padding: 26px 26px 18px;
             border-radius: 12px;
-            background: #ffffff;
+
+            background: var(--background-color);
             border: 1px solid rgba(49, 51, 63, 0.18);
             box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-        }
-        /* Заголовок внутри формы */
-        div[data-testid="stForm"] h2 {
-            margin-top: 0;
-            margin-bottom: 12px;
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="auth-banner">Оцифровка по Ozon</div>', unsafe_allow_html=True)
+    st.markdown(
+        '<div class="auth-banner">Оцифровка по Ozon</div>',
+        unsafe_allow_html=True,
+    )
 
-    st.markdown("## 🔐 Вход в приложение")
     with st.form("login_form"):
-        pwd = st.text_input("Пароль", type="password", placeholder="Введите пароль")
+        st.markdown("## 🔐 Вход в приложение")
+
+        pwd = st.text_input(
+            "Пароль",
+            type="password",
+            placeholder="Введите пароль",
+        )
+
         submitted = st.form_submit_button("Войти")
 
-    if submitted:
-        if pwd == APP_PASSWORD:
-            st.session_state.auth_ok = True
-            st.rerun()
-        else:
-            st.error("Неверный пароль")
+        if submitted:
+            if pwd == APP_PASSWORD:
+                st.session_state.auth_ok = True
+                st.rerun()
+            else:
+                st.error("Неверный пароль")
 
     st.stop()
-
 
 
 BASE_DIR = Path(__file__).resolve().parent
