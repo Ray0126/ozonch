@@ -17,11 +17,12 @@ if "auth_ok" not in st.session_state:
     st.session_state.auth_ok = False
 
 if not st.session_state.auth_ok:
+    # Стили: баннер + оформление самой формы (без "пустых прямоугольников")
     st.markdown(
         """
         <style>
         .auth-banner {
-	            max-width: 520px;
+            max-width: 520px;
             margin: 60px auto 18px;
             padding: 16px 22px;
             border-radius: 12px;
@@ -32,24 +33,21 @@ if not st.session_state.auth_ok:
             font-size: 20px;
             color: #ffffff;
         }
-	        /*
-	        Вместо "сырого" <div class="auth-box"> (который в Streamlit может давать
-	        лишний пустой прямоугольник из‑за разбиения DOM по виджетам)
-	        стилизуем сам контейнер формы.
-	        */
-	        div[data-testid="stForm"] {
-	            max-width: 520px;
-	            margin: 0 auto 80px;
-	            padding: 26px 26px 18px;
-	            border-radius: 12px;
-	            background: #ffffff;
-	            border: 1px solid rgba(49, 51, 63, 0.18);
-	            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
-	        }
-	        /* Чуть поджимаем заголовок внутри формы */
-	        div[data-testid="stForm"] h2 { margin-top: 0.2rem; }
-	        /* Убираем возможные пустые HTML‑вставки */
-	        .auth-spacer, .auth-box { display:none !important; }
+        /* Стилизуем именно Streamlit FORM — он реально оборачивает виджеты */
+        div[data-testid="stForm"] {
+            max-width: 520px;
+            margin: 0 auto 80px;
+            padding: 26px 26px 18px;
+            border-radius: 12px;
+            background: #ffffff;
+            border: 1px solid rgba(49, 51, 63, 0.18);
+            box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+        }
+        /* Заголовок внутри формы */
+        div[data-testid="stForm"] h2 {
+            margin-top: 0;
+            margin-bottom: 12px;
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -58,8 +56,7 @@ if not st.session_state.auth_ok:
     st.markdown('<div class="auth-banner">Оцифровка по Ozon</div>', unsafe_allow_html=True)
 
     st.markdown("## 🔐 Вход в приложение")
-
-    with st.form("login_form", clear_on_submit=False):
+    with st.form("login_form"):
         pwd = st.text_input("Пароль", type="password", placeholder="Введите пароль")
         submitted = st.form_submit_button("Войти")
 
