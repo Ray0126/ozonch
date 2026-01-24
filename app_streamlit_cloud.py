@@ -1010,74 +1010,16 @@ def extract_services_breakdown_from_ops(
         delivery_schema = posting.get("delivery_schema", "")
 
         services = op.get("services") or []
-        for s in services:
-            name = s.get("name") or s.get("service_name") or s.get("title") or ""
-            name_l = str(name).lower()
 
-            # ❌ исключаем эквайринг из services (он должен считаться по amount/operation_type_name)
-            if exclude_names and any(x in name_l for x in exclude_names):
-                continue
-
-            price = _to_float(s.get("price", 0))
-            rows.append({
-                "operation_id": op_id,
-                "operation_date": op_date,
-                "type_name": op_type_name,
-                "posting_number": posting_number,
-                "delivery_schema": delivery_schema,
-                "service_name": str(name),
-                "price": float(price),
-                "cost": float(max(-price, 0.0)),  # расходы как +число
-                "is_acquiring": ("эквайринг" in name_l) or ("acquiring" in name_l),
-            })
-
-    df = pd.DataFrame(rows)
-    if not df.empty:
-        # удобно сразу нормализовать
-        df["cost"] = pd.to_numeric(df["cost"], errors="coerce").fillna(0.0)
-        df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
-    return df
-
-def ops_to_df(ops: list[dict]) -> pd.DataFrame:
-    rows = []
-    for op in ops:
-        op_id = op.get("operation_id")
-        op_group = op.get("type", "")
-        op_code = op.get("operation_type", "")
-        op_type_name = op.get("operation_type_name", "") or op_code
-        op_date = op.get("operation_date", "")
-
-        accruals_total = _to_float(op.get("accruals_for_sale", 0))
-        commission_total = _to_float(op.get("sale_commission", 0))
-        amount_total = _to_float(op.get("amount", 0))
-        
-        # Эквайринг как отдельная операция (из amount)
-        is_acq_op = ("эквайринг" in str(op_type_name).lower()) or ("acquiring" in str(op_type_name).lower())
-        acquiring_total = amount_total if is_acq_op else 0.0
-
-
-        posting = op.get("posting") or {}
-        posting_number = posting.get("posting_number", "")
-        delivery_schema = posting.get("delivery_schema", "")
-
-        items = op.get("items") or []
-        services = op.get("services") or []        # --- услуги: общий + разрез на "баллы/партнерки/прочее"
+        # --- услуги: общий + разрез на "баллы/партнерки/прочее" + эквайринг отдельно ---
         services_total = 0.0
         bonus_sum = 0.0
         partner_sum = 0.0
-        
-        acquiring_services_sum = 0.0
         ads_order_sum = 0.0
+        acquiring_services_sum = 0.0
 
         for s in services:
-            sname = (s.get("name") or s.get("service_name") or s.get("title") or "").lower()
-
-            # ❌ эквайринг не должен попадать в services
-            if "эквайринг" in sname or "acquiring" in sname:
-                continue
-
             price = _to_float(s.get("price", 0))
-            services_total += price
             sname = s.get("name") or s.get("service_name") or s.get("title") or ""
             sname_l = str(sname).lower()
 
@@ -1085,6 +1027,9 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
             if ("эквайринг" in sname_l) or ("acquiring" in sname_l):
                 acquiring_services_sum += price
                 continue
+
+            # остальные услуги идут в services_total
+            services_total += price
 
             b = _service_bucket(str(sname))
             if b == "bonus":
@@ -1630,16 +1575,12 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["sku"] = sku_df["sku"].astype(int)
 
     # расходы (в API обычно минусом)
+    # расходы (в API обычно минусом)
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
     
     # Эквайринг — отдельно (берём из services, которые мы вынесли в ops_to_df)
     sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_service", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
-
-    sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
-    sku_df["services_cost"]   = (-sku_df["services_sum"]).clip(lower=0.0)
-
-
     # отдельно “Баллы за скидки” и “Программы партнёров”
     sku_df["bonus_cost"] = (-sku_df.get("bonus_points", 0)).clip(lower=0.0)
     sku_df["partner_cost"] = (-sku_df.get("partner_programs", 0)).clip(lower=0.0)
