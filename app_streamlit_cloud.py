@@ -974,15 +974,21 @@ if uploaded is not None:
 # ================== OPS -> DF ==================
 def _service_bucket(name: str) -> str:
     n = (name or "").lower()
+
+    # ✅ Оплата за заказ (CPA) — ВРЕМЕННО ИСКЛЮЧАЕМ из "Расходы Ozon"
+    # (потом выведем отдельно)
+    if ("оплата" in n and "заказ" in n) or ("pay" in n and "order" in n) or ("cpa" in n):
+        return "ads_order"
+
     # Баллы за скидки
     if ("балл" in n and "скид" in n) or ("bonus" in n and "discount" in n):
         return "bonus"
+
     # Программы партнёров
     if ("партн" in n) or ("partner" in n):
         return "partner"
+
     return "other"
-
-
 def ops_to_df(ops: list[dict]) -> pd.DataFrame:
     rows = []
     for op in ops:
@@ -1001,12 +1007,11 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
         delivery_schema = posting.get("delivery_schema", "")
 
         items = op.get("items") or []
-        services = op.get("services") or []
-
-        # --- услуги: общий + разрез на "баллы/партнерки/прочее"
+        services = op.get("services") or []        # --- услуги: общий + разрез на "баллы/партнерки/прочее"
         services_total = 0.0
         bonus_sum = 0.0
         partner_sum = 0.0
+        ads_order_sum = 0.0
 
         for s in services:
             price = _to_float(s.get("price", 0))
@@ -1017,10 +1022,11 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 bonus_sum += price
             elif b == "partner":
                 partner_sum += price
+            elif b == "ads_order":
+                # ВАЖНО: временно исключаем из расходов Ozon (отдельно пока не выводим)
+                ads_order_sum += price
 
-        services_other = services_total - bonus_sum - partner_sum
-
-        base = {
+        services_other = services_total - bonus_sum - partner_sum - ads_order_sumbase = {
             "operation_id": op_id,
             "operation_date": op_date,
             "type": op_group,
