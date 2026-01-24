@@ -5,6 +5,82 @@ import json
 import requests
 import streamlit as st
 import pandas as pd
+
+
+def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
+    """Распределяет расходы по эквайрингу по SKU на уровне posting_number.
+    Источник: операции finance с type_name содержащие 'эквайринг'/'acquiring'.
+    Для строк без SKU распределяет по SKU внутри того же posting_number пропорционально accruals_for_sale (если есть),
+    иначе поровну.
+    Возвращает копию df_ops с колонкой acquiring_cost (расход как +число).
+    """
+    if df_ops is None or df_ops.empty:
+        return df_ops
+
+    df = df_ops.copy()
+
+    if "acquiring_cost" not in df.columns:
+        df["acquiring_cost"] = 0.0
+
+    if "type_name" not in df.columns:
+        return df
+
+    tn = df["type_name"].astype(str).str.lower()
+    mask_acq = tn.str.contains("эквайринг", na=False) | tn.str.contains("acquiring", na=False)
+    if not mask_acq.any():
+        return df
+
+    amt = pd.to_numeric(df.get("amount", 0), errors="coerce").fillna(0.0)
+    acq_cost = (-amt).clip(lower=0.0)
+
+    if "posting_number" not in df.columns:
+        df.loc[mask_acq & df["sku"].notna(), "acquiring_cost"] += acq_cost[mask_acq & df["sku"].notna()].astype(float)
+        return df
+
+    direct = mask_acq & df["sku"].notna()
+    df.loc[direct, "acquiring_cost"] += acq_cost[direct].astype(float)
+
+    und = mask_acq & df["sku"].isna() & df["posting_number"].astype(str).ne("")
+    if not und.any():
+        return df
+
+    base = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
+    if base.empty:
+        return df
+
+    if "accruals_for_sale" in df.columns:
+        w = pd.to_numeric(
+            df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), "accruals_for_sale"],
+            errors="coerce"
+        ).fillna(0.0).abs()
+        base["w"] = w.values
+        base.loc[base["w"] <= 0, "w"] = 1.0
+    else:
+        base["w"] = 1.0
+
+    base["w_sum"] = base.groupby("posting_number")["w"].transform("sum")
+    base["share"] = base["w"] / base["w_sum"]
+
+    acq_by_post = df.loc[und, ["posting_number"]].copy()
+    acq_by_post["acq_cost"] = acq_cost[und].values
+    acq_sum = acq_by_post.groupby("posting_number", as_index=False)["acq_cost"].sum()
+
+    alloc = base.merge(acq_sum, on="posting_number", how="inner")
+    if alloc.empty:
+        return df
+    alloc["acq_alloc"] = alloc["acq_cost"] * alloc["share"]
+
+    key = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
+    key["idx"] = key.index.values
+    alloc2 = alloc.merge(key, on=["posting_number", "sku"], how="left").dropna(subset=["idx"])
+    if alloc2.empty:
+        return df
+
+    idx = alloc2["idx"].astype(int).values
+    df.loc[idx, "acquiring_cost"] += alloc2["acq_alloc"].astype(float).values
+
+    return df
+
 from datetime import date, timedelta, datetime
 from dotenv import load_dotenv
 import sys
@@ -1177,7 +1253,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "accruals_for_sale": accruals_total,
                 "sale_commission": commission_total,
                 "services_sum": services_other,
-                "acquiring_service": acquiring_services_sum,
+            \"acquiring_service\": acquiring_services_sum,
                 "acquiring_service": acquiring_services_sum,
                 "acquiring_amount": acquiring_total,
                 "bonus_points": bonus_sum,
@@ -1202,7 +1278,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "accruals_for_sale": accruals_total * w,
                 "sale_commission": commission_total * w,
                 "services_sum": services_other * w,
-                "acquiring_service": acquiring_services_sum * w,
+            \"acquiring_service\": acquiring_services_sum * w,
                 "acquiring_service": acquiring_services_sum * w,
                 "acquiring_amount": acquiring_total * w,
                 "bonus_points": bonus_sum * w,
@@ -1685,6 +1761,8 @@ def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd
 # ================== SOLD SKU TABLE ==================
 def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
     sku_df = df_ops[df_ops["sku"].notna()].copy()
+    # Эквайринг: распределяем из amount по posting_number (чтобы было по SKU)
+    sku_df = allocate_acquiring_cost_by_posting(sku_df)
     if sku_df.empty:
         return pd.DataFrame()
 
@@ -1698,7 +1776,6 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
     
     # Эквайринг — отдельно (берём из services, которые мы вынесли в ops_to_df)
-    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_service", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
     # отдельно “Баллы за скидки” и “Программы партнёров”
     sku_df["bonus_cost"] = (-sku_df.get("bonus_points", 0)).clip(lower=0.0)
     sku_df["partner_cost"] = (-sku_df.get("partner_programs", 0)).clip(lower=0.0)
