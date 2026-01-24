@@ -991,8 +991,15 @@ def _service_bucket(name: str) -> str:
     return "other"
 
 
-def extract_services_breakdown_from_ops(ops: list[dict]) -> pd.DataFrame:
-    """DEBUG: вытаскивает все services из сырых операций finance (ops list)."""
+def extract_services_breakdown_from_ops(
+    ops: list[dict],
+    exclude_names: tuple[str, ...] = ("эквайринг", "acquiring"),
+) -> pd.DataFrame:
+    """
+    DEBUG: вытаскивает все services из сырых операций finance (ops list).
+    exclude_names — подстроки (lower), которые нужно исключить из services
+    (например, эквайринг, чтобы не было двойного учета).
+    """
     rows = []
     for op in (ops or []):
         op_id = op.get("operation_id")
@@ -1001,9 +1008,16 @@ def extract_services_breakdown_from_ops(ops: list[dict]) -> pd.DataFrame:
         posting = op.get("posting") or {}
         posting_number = posting.get("posting_number", "")
         delivery_schema = posting.get("delivery_schema", "")
+
         services = op.get("services") or []
         for s in services:
             name = s.get("name") or s.get("service_name") or s.get("title") or ""
+            name_l = str(name).lower()
+
+            # ❌ исключаем эквайринг из services (он должен считаться по amount/operation_type_name)
+            if exclude_names and any(x in name_l for x in exclude_names):
+                continue
+
             price = _to_float(s.get("price", 0))
             rows.append({
                 "operation_id": op_id,
@@ -1014,8 +1028,15 @@ def extract_services_breakdown_from_ops(ops: list[dict]) -> pd.DataFrame:
                 "service_name": str(name),
                 "price": float(price),
                 "cost": float(max(-price, 0.0)),  # расходы как +число
+                "is_acquiring": ("эквайринг" in name_l) or ("acquiring" in name_l),
             })
-    return pd.DataFrame(rows)
+
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        # удобно сразу нормализовать
+        df["cost"] = pd.to_numeric(df["cost"], errors="coerce").fillna(0.0)
+        df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
+    return df
 
 def ops_to_df(ops: list[dict]) -> pd.DataFrame:
     rows = []
