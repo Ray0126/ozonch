@@ -1647,7 +1647,6 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
             commission=("commission_cost", "sum"),
             acquiring=("acquiring_cost", "sum"),
             logistics=("services_cost", "sum"),
-            acquiring=("acquiring_cost", "sum"),
             bonus_points=("bonus_cost", "sum"),
             partner_programs=("partner_cost", "sum"),
         )
