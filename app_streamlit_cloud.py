@@ -1632,16 +1632,12 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # расходы (в API обычно минусом)
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
-    # --- Эквайринг (отдельно, из services как в ЛК) ---
-    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_service", 0.0), errors="coerce").fillna(0.0)).clip(lower=0.0)
+    
+    # Эквайринг — отдельно (берём из services, которые мы вынесли в ops_to_df)
+    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_service", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
 
-
-
-    # amount в таких операциях обычно отрицательный => расход = -amount
-    amt = sku_df.loc[mask_acq, "amount"]
-    amt = amt.apply(lambda x: float(x) if x is not None and x != "" else 0.0)
-    sku_df.loc[mask_acq, "acquiring_cost"] = (-amt).clip(lower=0.0)
-
+    sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
+    sku_df["services_cost"]   = (-sku_df["services_sum"]).clip(lower=0.0)
 
 
     # отдельно “Баллы за скидки” и “Программы партнёров”
