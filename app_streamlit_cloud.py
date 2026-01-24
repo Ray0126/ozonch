@@ -972,7 +972,6 @@ if uploaded is not None:
         st.sidebar.error(f"Не смог прочитать файл: {e}")
 
 # ================== OPS -> DF ==================
-def # ================== OPS -> DF ==================
 def _service_bucket(name: str) -> str:
     n = (name or "").lower()
     # Баллы за скидки
@@ -1073,6 +1072,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     return df
+
 
 def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
     """
