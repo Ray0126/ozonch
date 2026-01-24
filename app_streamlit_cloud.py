@@ -1716,8 +1716,9 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
     
-    # Эквайринг — отдельно (берём из services, которые мы вынесли в ops_to_df)
-    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_service", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
+    # Эквайринг — отдельная операция "Оплата эквайринга" (operation_type_name).
+    # Берём распределённый amount (acquiring_amount_alloc) и превращаем в расход (+число).
+    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0.0), errors="coerce").fillna(0.0)).clip(lower=0.0)
 
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"]   = (-sku_df["services_sum"]).clip(lower=0.0)
@@ -1753,7 +1754,7 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # ВАЖНО: “Выручка” как в ЛК = GrossSales - Баллы - Партнерки
     g["accruals_net"] = g["gross_sales"] - g["bonus_points"] - g["partner_programs"]
 
-    g["sale_costs"] = g["commission"] + g["logistics"] + g["acquiring"]
+    g["sale_costs"] = g["commission"] + g["logistics"]  # Эквайринг показываем отдельно
 
     # COGS
     if cogs_df_local is None or cogs_df_local.empty:
@@ -2282,6 +2283,7 @@ with tab1:
             "accruals_net": "Выручка, ₽",
             "commission": "Комиссия, ₽",
             "logistics": "Услуги/логистика, ₽",
+            "acquiring": "Эквайринг, ₽",
             "sale_costs": "Расходы Ozon, ₽",
             "ads_total": "Реклама, ₽",
             "cogs_unit": "Себестоимость 1 шт, ₽",
@@ -2293,6 +2295,18 @@ with tab1:
             "margin_%": "Маржинальность, %",
             "roi_%": "ROI, %",
         })
+
+
+        # --- фиксированный порядок: Эквайринг перед "Расходы Ozon" ---
+        if "Эквайринг, ₽" in show.columns and "Расходы Ozon, ₽" in show.columns:
+            cols = list(show.columns)
+            try:
+                cols.remove("Эквайринг, ₽")
+                ins_at = cols.index("Расходы Ozon, ₽")
+                cols.insert(ins_at, "Эквайринг, ₽")
+                show = show[cols]
+            except Exception:
+                pass
 
 
         # === Доп. колонки для витрины (как на Ozon) ===
