@@ -1622,9 +1622,17 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
     
-    # Эквайринг считаем отдельно по amount (как в ЛК)
-    
-    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_amount", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
+    # --- Эквайринг (отдельно) ---
+    sku_df["acquiring_cost"] = 0.0
+
+    tn = sku_df.get("type_name", "").astype(str).str.lower()
+    mask_acq = tn.str.contains("эквайринг", na=False) | tn.str.contains("acquiring", na=False)
+
+    amt = sku_df.loc[mask_acq, "amount"]
+    amt = pd.to_numeric(amt, errors="coerce").fillna(0.0)
+
+    sku_df.loc[mask_acq, "acquiring_cost"] = (-amt).clip(lower=0.0)
+
 
     # amount в таких операциях обычно отрицательный => расход = -amount
     amt = sku_df.loc[mask_acq, "amount"]
