@@ -22,10 +22,11 @@ def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
     if "acquiring_cost" not in df.columns:
         df["acquiring_cost"] = 0.0
 
-    if "type_name" not in df.columns:
+    tn_col = "operation_type_name" if "operation_type_name" in df.columns else ("type_name" if "type_name" in df.columns else None)
+    if tn_col is None:
         return df
 
-    tn = df["type_name"].astype(str).str.lower()
+    tn = df[tn_col].astype(str).str.lower()
     mask_acq = tn.str.contains("эквайринг", na=False) | tn.str.contains("acquiring", na=False)
     if not mask_acq.any():
         return df
@@ -1760,9 +1761,10 @@ def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd
 
 # ================== SOLD SKU TABLE ==================
 def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
-    sku_df = df_ops[df_ops["sku"].notna()].copy()
-    # Эквайринг: распределяем из amount по posting_number (чтобы было по SKU)
-    sku_df = allocate_acquiring_cost_by_posting(sku_df)
+    # Эквайринг: распределяем из amount по posting_number на ПОЛНОМ df_ops (важно: строки без SKU нужны для распределения)
+    df_ops = allocate_acquiring_cost_by_posting(df_ops)
+
+    sku_df = df_ops.copy()
     if sku_df.empty:
         return pd.DataFrame()
 
