@@ -1140,7 +1140,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "accruals_for_sale": accruals_total * w,
                 "sale_commission": commission_total * w,
                 "services_sum": services_other * w,
-            \"acquiring_service\": acquiring_services_sum * w,
+                "acquiring_service": acquiring_services_sum * w,
                 "acquiring_amount": acquiring_total * w,
                 "bonus_points": bonus_sum * w,
                 "partner_programs": partner_sum * w,
