@@ -1063,6 +1063,12 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
         ads_order_sum = 0.0
 
         for s in services:
+            sname = (s.get("name") or s.get("service_name") or s.get("title") or "").lower()
+
+            # ❌ эквайринг не должен попадать в services
+            if "эквайринг" in sname or "acquiring" in sname:
+                continue
+
             price = _to_float(s.get("price", 0))
             services_total += price
             sname = s.get("name") or s.get("service_name") or s.get("title") or ""
