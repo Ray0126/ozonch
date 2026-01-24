@@ -1067,7 +1067,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
         partner_sum = 0.0
         
         acquiring_services_sum = 0.0
-ads_order_sum = 0.0
+        ads_order_sum = 0.0
 
         for s in services:
             sname = (s.get("name") or s.get("service_name") or s.get("title") or "").lower()
