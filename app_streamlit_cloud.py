@@ -7,39 +7,41 @@ import streamlit as st
 import pandas as pd
 
 
-def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
-    """Распределяет расходы по эквайрингу по SKU на уровне posting_number.
-    Источник: операции finance с type_name содержащие 'эквайринг'/'acquiring'.
-    Для строк без SKU распределяет по SKU внутри того же posting_number пропорционально accruals_for_sale (если есть),
-    иначе поровну.
-    Возвращает копию df_ops с колонкой acquiring_cost (расход как +число).
+def allocate_acquiring_amount_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
+    """Распределяет acquiring_amount (amount по операциям эквайринга) по SKU на уровне posting_number.
+
+    ВАЖНО: распределяем именно amount (может быть + и -), чтобы возвраты/компенсации уменьшали эквайринг (как в ЛК).
+    Возвращает df_ops с колонкой acquiring_amount_alloc (amount, распределенный на SKU-строки).
     """
     if df_ops is None or df_ops.empty:
         return df_ops
-
     df = df_ops.copy()
 
-    if "acquiring_cost" not in df.columns:
-        df["acquiring_cost"] = 0.0
+    if "acquiring_amount_alloc" not in df.columns:
+        df["acquiring_amount_alloc"] = 0.0
 
+    # определяем, какие строки являются эквайрингом
     tn_col = "operation_type_name" if "operation_type_name" in df.columns else ("type_name" if "type_name" in df.columns else None)
     if tn_col is None:
         return df
-
     tn = df[tn_col].astype(str).str.lower()
     mask_acq = tn.str.contains("эквайринг", na=False) | tn.str.contains("acquiring", na=False)
     if not mask_acq.any():
         return df
 
-    amt = pd.to_numeric(df.get("amount", 0), errors="coerce").fillna(0.0)
-    acq_cost = (-amt).clip(lower=0.0)
+    # берём специализированную колонку, если есть
+    if "acquiring_amount" in df.columns:
+        amt = pd.to_numeric(df["acquiring_amount"], errors="coerce").fillna(0.0)
+    else:
+        amt = pd.to_numeric(df.get("amount", 0), errors="coerce").fillna(0.0)
 
-    if "posting_number" not in df.columns:
-        df.loc[mask_acq & df["sku"].notna(), "acquiring_cost"] += acq_cost[mask_acq & df["sku"].notna()].astype(float)
-        return df
-
+    # 1) прямые строки с SKU
     direct = mask_acq & df["sku"].notna()
-    df.loc[direct, "acquiring_cost"] += acq_cost[direct].astype(float)
+    df.loc[direct, "acquiring_amount_alloc"] += amt[direct].astype(float)
+
+    # 2) строки без SKU — распределяем внутри posting_number
+    if "posting_number" not in df.columns:
+        return df
 
     und = mask_acq & df["sku"].isna() & df["posting_number"].astype(str).ne("")
     if not und.any():
@@ -49,6 +51,7 @@ def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
     if base.empty:
         return df
 
+    # веса: accruals_for_sale (если есть), иначе 1
     if "accruals_for_sale" in df.columns:
         w = pd.to_numeric(
             df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), "accruals_for_sale"],
@@ -63,13 +66,13 @@ def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
     base["share"] = base["w"] / base["w_sum"]
 
     acq_by_post = df.loc[und, ["posting_number"]].copy()
-    acq_by_post["acq_cost"] = acq_cost[und].values
-    acq_sum = acq_by_post.groupby("posting_number", as_index=False)["acq_cost"].sum()
+    acq_by_post["acq_amt"] = amt[und].values
+    acq_sum = acq_by_post.groupby("posting_number", as_index=False)["acq_amt"].sum()
 
     alloc = base.merge(acq_sum, on="posting_number", how="inner")
     if alloc.empty:
         return df
-    alloc["acq_alloc"] = alloc["acq_cost"] * alloc["share"]
+    alloc["acq_alloc"] = alloc["acq_amt"] * alloc["share"]
 
     key = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
     key["idx"] = key.index.values
@@ -78,7 +81,7 @@ def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
         return df
 
     idx = alloc2["idx"].astype(int).values
-    df.loc[idx, "acquiring_cost"] += alloc2["acq_alloc"].astype(float).values
+    df.loc[idx, "acquiring_amount_alloc"] += alloc2["acq_alloc"].astype(float).values
 
     return df
 
@@ -1087,94 +1090,33 @@ def extract_services_breakdown_from_ops(
         delivery_schema = posting.get("delivery_schema", "")
 
         services = op.get("services") or []
-
-        # --- услуги: общий + разрез на "баллы/партнерки/прочее" + эквайринг отдельно ---
-        services_total = 0.0
-        bonus_sum = 0.0
-        partner_sum = 0.0
-        ads_order_sum = 0.0
-        acquiring_services_sum = 0.0
-
         for s in services:
-            price = _to_float(s.get("price", 0))
-            sname = s.get("name") or s.get("service_name") or s.get("title") or ""
-            sname_l = str(sname).lower()
+            name = s.get("name") or s.get("service_name") or s.get("title") or ""
+            name_l = str(name).lower()
 
-            # Эквайринг берём из services (как в ЛК), но исключаем из services_sum
-            if ("эквайринг" in sname_l) or ("acquiring" in sname_l):
-                acquiring_services_sum += price
+            # ❌ исключаем эквайринг из services (он должен считаться по amount/operation_type_name)
+            if exclude_names and any(x in name_l for x in exclude_names):
                 continue
 
-            # остальные услуги идут в services_total
-            services_total += price
-
-            b = _service_bucket(str(sname))
-            if b == "bonus":
-                bonus_sum += price
-            elif b == "partner":
-                partner_sum += price
-            elif b == "ads_order":
-                # ВАЖНО: временно исключаем из расходов Ozon (отдельно пока не выводим)
-                ads_order_sum += price
-
-        services_other = services_total - bonus_sum - partner_sum - ads_order_sum
-        base = {
-            "operation_id": op_id,
-            "operation_date": op_date,
-            "type": op_group,
-            "operation_type": op_code,
-            "type_name": op_type_name,
-            "posting_number": posting_number,
-            "delivery_schema": delivery_schema,
-        }
-
-        if not items:
-            # items пусто — оставляем строку, потом распределим по SKU по posting_number
+            price = _to_float(s.get("price", 0))
             rows.append({
-                **base,
-                "sku": None,
-                "name": None,
-                "qty": 0.0,
-                "accruals_for_sale": accruals_total,
-                "sale_commission": commission_total,
-                "services_sum": services_other,
-                "acquiring_service": acquiring_services_sum,
-                "acquiring_amount": acquiring_total,
-                "bonus_points": bonus_sum,
-                "partner_programs": partner_sum,
-                "amount": amount_total,
-            })
-            continue
-
-        qtys = [max(_to_float(it.get("quantity", 1)), 0.0) for it in items]
-        total_qty = sum(qtys) if qtys else 0.0
-        if total_qty <= 0:
-            total_qty = float(len(items))
-            qtys = [1.0] * len(items)
-
-        for it, q in zip(items, qtys):
-            w = q / total_qty if total_qty else 0.0
-            rows.append({
-                **base,
-                "sku": it.get("sku"),
-                "name": it.get("name"),
-                "qty": q,
-                "accruals_for_sale": accruals_total * w,
-                "sale_commission": commission_total * w,
-                "services_sum": services_other * w,
-                "acquiring_service": acquiring_services_sum * w,
-                "acquiring_amount": acquiring_total * w,
-                "bonus_points": bonus_sum * w,
-                "partner_programs": partner_sum * w,
-                "amount": amount_total * w,
+                "operation_id": op_id,
+                "operation_date": op_date,
+                "type_name": op_type_name,
+                "posting_number": posting_number,
+                "delivery_schema": delivery_schema,
+                "service_name": str(name),
+                "price": float(price),
+                "cost": float(max(-price, 0.0)),  # расходы как +число
+                "is_acquiring": ("эквайринг" in name_l) or ("acquiring" in name_l),
             })
 
     df = pd.DataFrame(rows)
-    for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "bonus_points", "partner_programs", "amount", "qty"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    if not df.empty:
+        # удобно сразу нормализовать
+        df["cost"] = pd.to_numeric(df["cost"], errors="coerce").fillna(0.0)
+        df["price"] = pd.to_numeric(df["price"], errors="coerce").fillna(0.0)
     return df
-
 
 def ops_to_df(ops: list[dict]) -> pd.DataFrame:
     rows = []
@@ -1215,6 +1157,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 continue
 
             price = _to_float(s.get("price", 0))
+            services_total += price
             sname = s.get("name") or s.get("service_name") or s.get("title") or ""
             sname_l = str(sname).lower()
 
@@ -1224,7 +1167,6 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 continue
 
             b = _service_bucket(str(sname))
-            services_total += price
             if b == "bonus":
                 bonus_sum += price
             elif b == "partner":
@@ -1255,7 +1197,6 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "sale_commission": commission_total,
                 "services_sum": services_other,
                 "acquiring_service": acquiring_services_sum,
-                "acquiring_service": acquiring_services_sum,
                 "acquiring_amount": acquiring_total,
                 "bonus_points": bonus_sum,
                 "partner_programs": partner_sum,
@@ -1279,7 +1220,6 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "accruals_for_sale": accruals_total * w,
                 "sale_commission": commission_total * w,
                 "services_sum": services_other * w,
-                "acquiring_service": acquiring_services_sum * w,
                 "acquiring_service": acquiring_services_sum * w,
                 "acquiring_amount": acquiring_total * w,
                 "bonus_points": bonus_sum * w,
@@ -1371,7 +1311,7 @@ def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
     out = pd.concat(out_rows, ignore_index=True)
 
     # финальная чистка типов
-    for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "bonus_points", "partner_programs", "amount", "qty"]:
+    for c in ["accruals_for_sale", "sale_commission", "services_sum", "bonus_points", "partner_programs", "amount", "qty"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
 
@@ -1761,10 +1701,10 @@ def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd
 
 # ================== SOLD SKU TABLE ==================
 def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
-    # Эквайринг: распределяем из amount по posting_number на ПОЛНОМ df_ops (важно: строки без SKU нужны для распределения)
-    df_ops = allocate_acquiring_cost_by_posting(df_ops)
+    # Эквайринг: распределяем acquiring_amount по SKU на уровне posting_number (до фильтрации sku)
+    df_ops = allocate_acquiring_amount_by_posting(df_ops)
 
-    sku_df = df_ops.copy()
+    sku_df = df_ops[df_ops["sku"].notna()].copy()
     if sku_df.empty:
         return pd.DataFrame()
 
@@ -1773,11 +1713,16 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["sku"] = sku_df["sku"].astype(int)
 
     # расходы (в API обычно минусом)
-    # расходы (в API обычно минусом)
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
     
     # Эквайринг — отдельно (берём из services, которые мы вынесли в ops_to_df)
+    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_service", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
+
+    sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
+    sku_df["services_cost"]   = (-sku_df["services_sum"]).clip(lower=0.0)
+
+
     # отдельно “Баллы за скидки” и “Программы партнёров”
     sku_df["bonus_cost"] = (-sku_df.get("bonus_points", 0)).clip(lower=0.0)
     sku_df["partner_cost"] = (-sku_df.get("partner_programs", 0)).clip(lower=0.0)
@@ -1797,6 +1742,7 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
             commission=("commission_cost", "sum"),
             acquiring=("acquiring_cost", "sum"),
             logistics=("services_cost", "sum"),
+        acquiring_amount=("acquiring_amount_alloc", "sum"),
             bonus_points=("bonus_cost", "sum"),
             partner_programs=("partner_cost", "sum"),
         )
@@ -2059,7 +2005,102 @@ with tab1:
 
 
     # ================== DEBUG: разбор логистики по одному артикулу (Polyarnaya-210) ==================
+    with st.expander("DEBUG: Polyarnaya-210 — из чего складываются расходы (по operation_type_name)", expanded=False):
+        target_article = "Polyarnaya-210"
+        sku_list = []
+        try:
+            if cogs_df is not None and not cogs_df.empty and "article" in cogs_df.columns and "sku" in cogs_df.columns:
+                _c = cogs_df.copy()
+                _c["article"] = _c["article"].astype(str)
+                _c["sku"] = pd.to_numeric(_c["sku"], errors="coerce")
+                sku_list = _c.loc[_c["article"] == target_article, "sku"].dropna().astype(int).unique().tolist()
+        except Exception:
+            sku_list = []
+
+        if not sku_list:
+            st.warning("Не найден SKU для артикула Polyarnaya-210 в cogs_df (нужна связка article→sku).")
+        else:
+            st.write("SKU для Polyarnaya-210:", sku_list)
+
+            # 1) вытаскиваем строки по этому SKU из сырых ops (items -> sku)
+            rows = []
+            for op in (ops_now or []):
+                items = op.get("items") or []
+                hit = False
+                for it in items:
+                    try:
+                        sku = int(it.get("sku"))
+                    except Exception:
+                        continue
+                    if sku in sku_list:
+                        hit = True
+                        break
+                if not hit:
+                    continue
+
+                tname = op.get("operation_type_name", "") or op.get("operation_type", "")
+                otype = op.get("type", "")
+                amt = _to_float(op.get("amount", 0))
+                comm = _to_float(op.get("sale_commission", 0))
+                accr = _to_float(op.get("accruals_for_sale", 0))
+                posting = op.get("posting") or {}
+                pn = posting.get("posting_number", "")
+
+                rows.append({
+                    "type": otype,
+                    "operation_type_name": str(tname),
+                    "posting_number": pn,
+                    "amount": amt,
+                    "sale_commission": comm,
+                    "accruals_for_sale": accr,
+                })
+
+            df_dbg = pd.DataFrame(rows)
+            if df_dbg.empty:
+                st.info("В ops_now не найдено операций с items по этому SKU. Если операции без items — их нужно будет распределять по posting_number.")
+            else:
+                df_dbg["amount"] = pd.to_numeric(df_dbg["amount"], errors="coerce").fillna(0.0)
+                df_dbg["commission_cost"] = (-pd.to_numeric(df_dbg["sale_commission"], errors="coerce").fillna(0.0)).clip(lower=0.0)
+
+                # расходы по amount: если amount отрицательный, то это расход
+                df_dbg["amount_cost"] = (-df_dbg["amount"]).clip(lower=0.0)
+
+                st.markdown("**Сводка расходов по operation_type_name (из amount):**")
+                g = (df_dbg.groupby("operation_type_name", as_index=False)
+                          .agg(amount_cost=("amount_cost", "sum"),
+                               commission_cost=("commission_cost", "sum"),
+                               amount_sum=("amount", "sum"))
+                          .sort_values("amount_cost", ascending=False))
+                st.dataframe(g, use_container_width=True)
+
+                st.markdown("**Подозрительные строки ~500–600 ₽ (ищем разницу ~551 ₽):**")
+                suspects = g[g["amount_cost"].between(500, 600)]
+                if suspects.empty:
+                    st.write("Не найдено категорий в диапазоне 500–600 ₽ по amount. Тогда разница может быть в services_sum или в распределении операций без items.")
+                else:
+                    st.dataframe(suspects, use_container_width=True)
+
+                st.markdown("**Топ операций по posting_number (первые 50 строк):**")
+                st.dataframe(df_dbg.sort_values("amount_cost", ascending=False).head(50), use_container_width=True)
+
     # ================== DEBUG: РАЗБОР УСЛУГ (services) ИЗ СЫРЫХ ОПЕРАЦИЙ ==================
+    with st.expander("DEBUG: из чего складывается 'Логистика' (услуги Ozon) — из сырых ops", expanded=False):
+        df_srv = extract_services_breakdown_from_ops(ops_now)
+        if df_srv.empty:
+            st.write("В сырых ops нет services (пусто). Тогда твоя 'логистика' должна считаться не из services — нужно искать по operation_type_name/amount.")
+        else:
+            st.write("ИТОГО services_cost:", float(df_srv["cost"].sum()))
+            g_name = (df_srv.groupby("service_name", as_index=False)
+                          .agg(cost=("cost", "sum"), price=("price", "sum"))
+                          .sort_values("cost", ascending=False))
+            st.dataframe(g_name.head(120), use_container_width=True)
+
+            # быстрый фильтр подозрительных ~551 ₽
+            suspects = g_name[g_name["cost"].between(500, 600)]
+            if not suspects.empty:
+                st.markdown("**Подозрительные услуги ~500–600 ₽ (ищем разницу ~551 ₽):**")
+                st.dataframe(suspects, use_container_width=True)
+
     df_ops = ops_to_df(ops_now)
     df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
 
@@ -2230,10 +2271,6 @@ with tab1:
         # прибыльные метрики по новым формулам
         sold_view = compute_profitability(sold_view)
 
-        # Эквайринг: отдельная колонка (пока просто выводим; если нет в данных — 0)
-        if "acquiring_cost" not in sold_view.columns:
-            sold_view["acquiring_cost"] = 0.0
-
         show = sold_view.copy()
         show = show.rename(columns={
             "article": "Артикул",
@@ -2243,7 +2280,6 @@ with tab1:
             "qty_returns": "Возвраты, шт",
             "qty_buyout": "Выкуп, шт",
             "accruals_net": "Выручка, ₽",
-            "acquiring_cost": "Эквайринг, ₽",
             "commission": "Комиссия, ₽",
             "logistics": "Услуги/логистика, ₽",
             "sale_costs": "Расходы Ozon, ₽",
@@ -2281,7 +2317,7 @@ with tab1:
             "Артикул","SKU","Название",
             "Заказы, шт","Возвраты, шт","Выкуп, шт","% выкупа",
             "Выручка, ₽","Средняя цена продажи, ₽","ДРР, %",
-            "Комиссия, ₽","Услуги/логистика, ₽","Эквайринг, ₽","Расходы Ozon, ₽","Реклама, ₽",
+            "Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
         ]
@@ -2310,19 +2346,7 @@ with tab1:
 
 
 
-        
-        # --- фиксированный порядок: Эквайринг перед "Расходы Ozon" ---
-        if "Эквайринг, ₽" in show.columns and "Расходы Ozon, ₽" in show.columns:
-            cols = list(show.columns)
-            try:
-                cols.remove("Эквайринг, ₽")
-                ins_at = cols.index("Расходы Ozon, ₽")
-                cols.insert(ins_at, "Эквайринг, ₽")
-                show = show[cols]
-            except Exception:
-                pass
-
-# --- Настройка порядка/видимости колонок (простое решение без компонентов) ---
+        # --- Настройка порядка/видимости колонок (простое решение без компонентов) ---
         # Важно: в Streamlit нет drag&drop перестановки колонок в st.dataframe,
         # поэтому делаем лёгкий UI: выбрать колонку и двигать вверх/вниз + скрывать.
         default_cols = list(show.columns)
