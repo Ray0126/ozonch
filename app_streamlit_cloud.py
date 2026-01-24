@@ -1065,7 +1065,9 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
         services_total = 0.0
         bonus_sum = 0.0
         partner_sum = 0.0
-        ads_order_sum = 0.0
+        
+        acquiring_services_sum = 0.0
+ads_order_sum = 0.0
 
         for s in services:
             sname = (s.get("name") or s.get("service_name") or s.get("title") or "").lower()
@@ -1077,6 +1079,13 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
             price = _to_float(s.get("price", 0))
             services_total += price
             sname = s.get("name") or s.get("service_name") or s.get("title") or ""
+            sname_l = str(sname).lower()
+
+            # Эквайринг берём из services (как в ЛК), но исключаем из services_sum
+            if ("эквайринг" in sname_l) or ("acquiring" in sname_l):
+                acquiring_services_sum += price
+                continue
+
             b = _service_bucket(str(sname))
             if b == "bonus":
                 bonus_sum += price
@@ -1107,6 +1116,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "accruals_for_sale": accruals_total,
                 "sale_commission": commission_total,
                 "services_sum": services_other,
+            \"acquiring_service\": acquiring_services_sum,
                 "acquiring_amount": acquiring_total,
                 "bonus_points": bonus_sum,
                 "partner_programs": partner_sum,
@@ -1130,6 +1140,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "accruals_for_sale": accruals_total * w,
                 "sale_commission": commission_total * w,
                 "services_sum": services_other * w,
+            \"acquiring_service\": acquiring_services_sum * w,
                 "acquiring_amount": acquiring_total * w,
                 "bonus_points": bonus_sum * w,
                 "partner_programs": partner_sum * w,
@@ -1137,7 +1148,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
             })
 
     df = pd.DataFrame(rows)
-    for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_amount", "bonus_points", "partner_programs", "amount", "qty"]:
+    for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "bonus_points", "partner_programs", "amount", "qty"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     return df
@@ -1212,7 +1223,7 @@ def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
                 newr["qty"] = float(wr["w_qty"])
 
             # суммы распределяем по весу
-            for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_amount", "bonus_points", "partner_programs", "amount"]:
+            for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "bonus_points", "partner_programs", "amount"]:
                 newr[c] = _to_float(newr.get(c, 0)) * k
 
             out_rows.append(pd.DataFrame([newr]))
@@ -1220,7 +1231,7 @@ def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
     out = pd.concat(out_rows, ignore_index=True)
 
     # финальная чистка типов
-    for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_amount", "bonus_points", "partner_programs", "amount", "qty"]:
+    for c in ["accruals_for_sale", "sale_commission", "services_sum", "bonus_points", "partner_programs", "amount", "qty"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
 
@@ -1621,12 +1632,17 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # расходы (в API обычно минусом)
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
-    
-    # --- Эквайринг (отдельно) ---
-    if "acquiring_amount" in sku_df.columns:
-        sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df["acquiring_amount"], errors="coerce").fillna(0.0)).clip(lower=0.0)
-    else:
-        sku_df["acquiring_cost"] = 0.0
+    # --- Эквайринг (отдельно, из services как в ЛК) ---
+    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_service", 0.0), errors="coerce").fillna(0.0)).clip(lower=0.0)
+
+
+
+    # amount в таких операциях обычно отрицательный => расход = -amount
+    amt = sku_df.loc[mask_acq, "amount"]
+    amt = amt.apply(lambda x: float(x) if x is not None and x != "" else 0.0)
+    sku_df.loc[mask_acq, "acquiring_cost"] = (-amt).clip(lower=0.0)
+
+
 
     # отдельно “Баллы за скидки” и “Программы партнёров”
     sku_df["bonus_cost"] = (-sku_df.get("bonus_points", 0)).clip(lower=0.0)
@@ -1657,10 +1673,7 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # ВАЖНО: “Выручка” как в ЛК = GrossSales - Баллы - Партнерки
     g["accruals_net"] = g["gross_sales"] - g["bonus_points"] - g["partner_programs"]
 
-    g["sale_costs"] = g["commission"] + g["logistics"] + g.get("acquiring", 0.0)
-
-    # для удобства: отдельной колонкой эквайринг
-    g["acquiring"] = g.get("acquiring", 0.0)
+    g["sale_costs"] = g["commission"] + g["logistics"] + g["acquiring"]
 
     # COGS
     if cogs_df_local is None or cogs_df_local.empty:
