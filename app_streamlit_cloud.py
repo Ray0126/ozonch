@@ -1099,6 +1099,124 @@ def extract_services_breakdown_from_ops(
     return df
 
 
+def ops_to_df(ops: list[dict]) -> pd.DataFrame:
+    rows = []
+    for op in ops:
+        op_id = op.get("operation_id")
+        op_group = op.get("type", "")
+        op_code = op.get("operation_type", "")
+        op_type_name = op.get("operation_type_name", "") or op_code
+        op_date = op.get("operation_date", "")
+
+        accruals_total = _to_float(op.get("accruals_for_sale", 0))
+        commission_total = _to_float(op.get("sale_commission", 0))
+        amount_total = _to_float(op.get("amount", 0))
+        
+        # Эквайринг как отдельная операция (из amount)
+        is_acq_op = ("эквайринг" in str(op_type_name).lower()) or ("acquiring" in str(op_type_name).lower())
+        acquiring_total = amount_total if is_acq_op else 0.0
+
+
+        posting = op.get("posting") or {}
+        posting_number = posting.get("posting_number", "")
+        delivery_schema = posting.get("delivery_schema", "")
+
+        items = op.get("items") or []
+        services = op.get("services") or []        # --- услуги: общий + разрез на "баллы/партнерки/прочее"
+        services_total = 0.0
+        bonus_sum = 0.0
+        partner_sum = 0.0
+        
+        acquiring_services_sum = 0.0
+        ads_order_sum = 0.0
+
+        for s in services:
+            sname = (s.get("name") or s.get("service_name") or s.get("title") or "").lower()
+
+            # ❌ эквайринг не должен попадать в services
+            if "эквайринг" in sname or "acquiring" in sname:
+                continue
+
+            price = _to_float(s.get("price", 0))
+            sname = s.get("name") or s.get("service_name") or s.get("title") or ""
+            sname_l = str(sname).lower()
+
+            # Эквайринг берём из services (как в ЛК), но исключаем из services_sum
+            if ("эквайринг" in sname_l) or ("acquiring" in sname_l):
+                acquiring_services_sum += price
+                continue
+
+            b = _service_bucket(str(sname))
+            services_total += price
+            if b == "bonus":
+                bonus_sum += price
+            elif b == "partner":
+                partner_sum += price
+            elif b == "ads_order":
+                # ВАЖНО: временно исключаем из расходов Ozon (отдельно пока не выводим)
+                ads_order_sum += price
+
+        services_other = services_total - bonus_sum - partner_sum - ads_order_sum
+        base = {
+            "operation_id": op_id,
+            "operation_date": op_date,
+            "type": op_group,
+            "operation_type": op_code,
+            "type_name": op_type_name,
+            "posting_number": posting_number,
+            "delivery_schema": delivery_schema,
+        }
+
+        if not items:
+            # items пусто — оставляем строку, потом распределим по SKU по posting_number
+            rows.append({
+                **base,
+                "sku": None,
+                "name": None,
+                "qty": 0.0,
+                "accruals_for_sale": accruals_total,
+                "sale_commission": commission_total,
+                "services_sum": services_other,
+            \"acquiring_service\": acquiring_services_sum,
+                "acquiring_service": acquiring_services_sum,
+                "acquiring_amount": acquiring_total,
+                "bonus_points": bonus_sum,
+                "partner_programs": partner_sum,
+                "amount": amount_total,
+            })
+            continue
+
+        qtys = [max(_to_float(it.get("quantity", 1)), 0.0) for it in items]
+        total_qty = sum(qtys) if qtys else 0.0
+        if total_qty <= 0:
+            total_qty = float(len(items))
+            qtys = [1.0] * len(items)
+
+        for it, q in zip(items, qtys):
+            w = q / total_qty if total_qty else 0.0
+            rows.append({
+                **base,
+                "sku": it.get("sku"),
+                "name": it.get("name"),
+                "qty": q,
+                "accruals_for_sale": accruals_total * w,
+                "sale_commission": commission_total * w,
+                "services_sum": services_other * w,
+            \"acquiring_service\": acquiring_services_sum * w,
+                "acquiring_service": acquiring_services_sum * w,
+                "acquiring_amount": acquiring_total * w,
+                "bonus_points": bonus_sum * w,
+                "partner_programs": partner_sum * w,
+                "amount": amount_total * w,
+            })
+
+    df = pd.DataFrame(rows)
+    for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "bonus_points", "partner_programs", "amount", "qty"]:
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+    return df
+
+
 def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
     """
     Распределяет строки, где sku=None (items пустые), по SKU внутри того же posting_number,
@@ -1176,7 +1294,7 @@ def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
     out = pd.concat(out_rows, ignore_index=True)
 
     # финальная чистка типов
-    for c in ["accruals_for_sale", "sale_commission", "services_sum", "bonus_points", "partner_programs", "amount", "qty"]:
+    for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "bonus_points", "partner_programs", "amount", "qty"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
 
