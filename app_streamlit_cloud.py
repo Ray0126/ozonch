@@ -1921,102 +1921,7 @@ with tab1:
 
 
     # ================== DEBUG: разбор логистики по одному артикулу (Polyarnaya-210) ==================
-    with st.expander("DEBUG: Polyarnaya-210 — из чего складываются расходы (по operation_type_name)", expanded=False):
-        target_article = "Polyarnaya-210"
-        sku_list = []
-        try:
-            if cogs_df is not None and not cogs_df.empty and "article" in cogs_df.columns and "sku" in cogs_df.columns:
-                _c = cogs_df.copy()
-                _c["article"] = _c["article"].astype(str)
-                _c["sku"] = pd.to_numeric(_c["sku"], errors="coerce")
-                sku_list = _c.loc[_c["article"] == target_article, "sku"].dropna().astype(int).unique().tolist()
-        except Exception:
-            sku_list = []
-
-        if not sku_list:
-            st.warning("Не найден SKU для артикула Polyarnaya-210 в cogs_df (нужна связка article→sku).")
-        else:
-            st.write("SKU для Polyarnaya-210:", sku_list)
-
-            # 1) вытаскиваем строки по этому SKU из сырых ops (items -> sku)
-            rows = []
-            for op in (ops_now or []):
-                items = op.get("items") or []
-                hit = False
-                for it in items:
-                    try:
-                        sku = int(it.get("sku"))
-                    except Exception:
-                        continue
-                    if sku in sku_list:
-                        hit = True
-                        break
-                if not hit:
-                    continue
-
-                tname = op.get("operation_type_name", "") or op.get("operation_type", "")
-                otype = op.get("type", "")
-                amt = _to_float(op.get("amount", 0))
-                comm = _to_float(op.get("sale_commission", 0))
-                accr = _to_float(op.get("accruals_for_sale", 0))
-                posting = op.get("posting") or {}
-                pn = posting.get("posting_number", "")
-
-                rows.append({
-                    "type": otype,
-                    "operation_type_name": str(tname),
-                    "posting_number": pn,
-                    "amount": amt,
-                    "sale_commission": comm,
-                    "accruals_for_sale": accr,
-                })
-
-            df_dbg = pd.DataFrame(rows)
-            if df_dbg.empty:
-                st.info("В ops_now не найдено операций с items по этому SKU. Если операции без items — их нужно будет распределять по posting_number.")
-            else:
-                df_dbg["amount"] = pd.to_numeric(df_dbg["amount"], errors="coerce").fillna(0.0)
-                df_dbg["commission_cost"] = (-pd.to_numeric(df_dbg["sale_commission"], errors="coerce").fillna(0.0)).clip(lower=0.0)
-
-                # расходы по amount: если amount отрицательный, то это расход
-                df_dbg["amount_cost"] = (-df_dbg["amount"]).clip(lower=0.0)
-
-                st.markdown("**Сводка расходов по operation_type_name (из amount):**")
-                g = (df_dbg.groupby("operation_type_name", as_index=False)
-                          .agg(amount_cost=("amount_cost", "sum"),
-                               commission_cost=("commission_cost", "sum"),
-                               amount_sum=("amount", "sum"))
-                          .sort_values("amount_cost", ascending=False))
-                st.dataframe(g, use_container_width=True)
-
-                st.markdown("**Подозрительные строки ~500–600 ₽ (ищем разницу ~551 ₽):**")
-                suspects = g[g["amount_cost"].between(500, 600)]
-                if suspects.empty:
-                    st.write("Не найдено категорий в диапазоне 500–600 ₽ по amount. Тогда разница может быть в services_sum или в распределении операций без items.")
-                else:
-                    st.dataframe(suspects, use_container_width=True)
-
-                st.markdown("**Топ операций по posting_number (первые 50 строк):**")
-                st.dataframe(df_dbg.sort_values("amount_cost", ascending=False).head(50), use_container_width=True)
-
     # ================== DEBUG: РАЗБОР УСЛУГ (services) ИЗ СЫРЫХ ОПЕРАЦИЙ ==================
-    with st.expander("DEBUG: из чего складывается 'Логистика' (услуги Ozon) — из сырых ops", expanded=False):
-        df_srv = extract_services_breakdown_from_ops(ops_now)
-        if df_srv.empty:
-            st.write("В сырых ops нет services (пусто). Тогда твоя 'логистика' должна считаться не из services — нужно искать по operation_type_name/amount.")
-        else:
-            st.write("ИТОГО services_cost:", float(df_srv["cost"].sum()))
-            g_name = (df_srv.groupby("service_name", as_index=False)
-                          .agg(cost=("cost", "sum"), price=("price", "sum"))
-                          .sort_values("cost", ascending=False))
-            st.dataframe(g_name.head(120), use_container_width=True)
-
-            # быстрый фильтр подозрительных ~551 ₽
-            suspects = g_name[g_name["cost"].between(500, 600)]
-            if not suspects.empty:
-                st.markdown("**Подозрительные услуги ~500–600 ₽ (ищем разницу ~551 ₽):**")
-                st.dataframe(suspects, use_container_width=True)
-
     df_ops = ops_to_df(ops_now)
     df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
 
@@ -2187,6 +2092,10 @@ with tab1:
         # прибыльные метрики по новым формулам
         sold_view = compute_profitability(sold_view)
 
+        # Эквайринг: отдельная колонка (пока просто выводим; если нет в данных — 0)
+        if "acquiring_cost" not in sold_view.columns:
+            sold_view["acquiring_cost"] = 0.0
+
         show = sold_view.copy()
         show = show.rename(columns={
             "article": "Артикул",
@@ -2196,6 +2105,7 @@ with tab1:
             "qty_returns": "Возвраты, шт",
             "qty_buyout": "Выкуп, шт",
             "accruals_net": "Выручка, ₽",
+            "acquiring_cost": "Эквайринг, ₽",
             "commission": "Комиссия, ₽",
             "logistics": "Услуги/логистика, ₽",
             "sale_costs": "Расходы Ozon, ₽",
@@ -2233,7 +2143,7 @@ with tab1:
             "Артикул","SKU","Название",
             "Заказы, шт","Возвраты, шт","Выкуп, шт","% выкупа",
             "Выручка, ₽","Средняя цена продажи, ₽","ДРР, %",
-            "Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
+            "Комиссия, ₽","Услуги/логистика, ₽","Эквайринг, ₽","Расходы Ozon, ₽","Реклама, ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
         ]
@@ -2262,7 +2172,19 @@ with tab1:
 
 
 
-        # --- Настройка порядка/видимости колонок (простое решение без компонентов) ---
+        
+        # --- фиксированный порядок: Эквайринг перед "Расходы Ozon" ---
+        if "Эквайринг, ₽" in show.columns and "Расходы Ozon, ₽" in show.columns:
+            cols = list(show.columns)
+            try:
+                cols.remove("Эквайринг, ₽")
+                ins_at = cols.index("Расходы Ozon, ₽")
+                cols.insert(ins_at, "Эквайринг, ₽")
+                show = show[cols]
+            except Exception:
+                pass
+
+# --- Настройка порядка/видимости колонок (простое решение без компонентов) ---
         # Важно: в Streamlit нет drag&drop перестановки колонок в st.dataframe,
         # поэтому делаем лёгкий UI: выбрать колонку и двигать вверх/вниз + скрывать.
         default_cols = list(show.columns)
