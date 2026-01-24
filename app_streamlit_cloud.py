@@ -1026,7 +1026,8 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 # ВАЖНО: временно исключаем из расходов Ozon (отдельно пока не выводим)
                 ads_order_sum += price
 
-        services_other = services_total - bonus_sum - partner_sum - ads_order_sumbase = {
+        services_other = services_total - bonus_sum - partner_sum - ads_order_sum
+        base = {
             "operation_id": op_id,
             "operation_date": op_date,
             "type": op_group,
