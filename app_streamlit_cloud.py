@@ -991,33 +991,34 @@ def _service_bucket(name: str) -> str:
     return "other"
 
 
-def _lk_service_bucket(name: str) -> str:
-    """Пробуем приблизить разрез услуг к тому, как они показаны в ЛК Юнит-экономики.
-    Это только для диагностики (разбор сумм), не влияет на расчёты.
-    """
-    n = (name or "").lower()
-
-    # Эквайринг
-    if "эквайр" in n or "acquiring" in n:
-        return "Эквайринг"
-
-    # Обработка отправления
-    if ("обработ" in n and "отправ" in n) or ("processing" in n and "shipment" in n) or ("handling" in n):
-        return "Обработка отправления"
-
-    # Доставка до места выдачи
-    if ("достав" in n and "мест" in n and "выда" in n) or ("pickup" in n) or ("pvz" in n):
-        return "Доставка до места выдачи"
-
-    # Логистика (общая)
-    if "логист" in n or "delivery" in n or "достав" in n:
-        return "Логистика"
-
-    return "Прочие услуги"
+def extract_services_breakdown_from_ops(ops: list[dict]) -> pd.DataFrame:
+    """DEBUG: вытаскивает все services из сырых операций finance (ops list)."""
+    rows = []
+    for op in (ops or []):
+        op_id = op.get("operation_id")
+        op_type_name = op.get("operation_type_name", "") or op.get("operation_type", "")
+        op_date = op.get("operation_date", "")
+        posting = op.get("posting") or {}
+        posting_number = posting.get("posting_number", "")
+        delivery_schema = posting.get("delivery_schema", "")
+        services = op.get("services") or []
+        for s in services:
+            name = s.get("name") or s.get("service_name") or s.get("title") or ""
+            price = _to_float(s.get("price", 0))
+            rows.append({
+                "operation_id": op_id,
+                "operation_date": op_date,
+                "type_name": op_type_name,
+                "posting_number": posting_number,
+                "delivery_schema": delivery_schema,
+                "service_name": str(name),
+                "price": float(price),
+                "cost": float(max(-price, 0.0)),  # расходы как +число
+            })
+    return pd.DataFrame(rows)
 
 def ops_to_df(ops: list[dict]) -> pd.DataFrame:
     rows = []
-    service_rows = []  # DEBUG: построчный разбор услуг (services)
     for op in ops:
         op_id = op.get("operation_id")
         op_group = op.get("type", "")
@@ -1044,20 +1045,6 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
             price = _to_float(s.get("price", 0))
             services_total += price
             sname = s.get("name") or s.get("service_name") or s.get("title") or ""
-
-            # DEBUG: сохраняем услуги построчно (потом покажем разбор "логистики" как в ЛК)
-            try:
-                service_rows.append({
-                    "operation_id": op_id,
-                    "operation_date": op_date,
-                    "type_name": op_type_name,
-                    "posting_number": posting_number,
-                    "delivery_schema": delivery_schema,
-                    "service_name": str(sname),
-                    "price": price,
-                })
-            except Exception:
-                pass
             b = _service_bucket(str(sname))
             if b == "bonus":
                 bonus_sum += price
@@ -1119,11 +1106,6 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
     for c in ["accruals_for_sale", "sale_commission", "services_sum", "bonus_points", "partner_programs", "amount", "qty"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-    # DEBUG: прикрепляем услуги (для разбора логистики/эквайринга/обработки)
-    try:
-        df.attrs["service_rows"] = service_rows
-    except Exception:
-        pass
     return df
 
 
@@ -1883,49 +1865,27 @@ with tab1:
     ops_now, ops_err_title, ops_err_details = load_ops_range(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
     if ops_err_title:
         _block_with_retry(ops_err_title, ops_err_details, cache_clear_fn=load_ops_range.clear)
-    df_ops = ops_to_df(ops_now)
-    df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
 
-    # ================== DEBUG: РАЗБОР УСЛУГ (ЛОГИСТИКА/ЭКВАЙРИНГ/и т.п.) ==================
-    with st.expander("DEBUG: из чего складывается 'Логистика' (услуги Ozon)", expanded=False):
-        rows_srv = df_ops.attrs.get("service_rows", []) if hasattr(df_ops, "attrs") else []
-        if not rows_srv:
-            st.write("Нет данных services для разбора (service_rows пуст).")
+    # ================== DEBUG: РАЗБОР УСЛУГ (services) ИЗ СЫРЫХ ОПЕРАЦИЙ ==================
+    with st.expander("DEBUG: из чего складывается 'Логистика' (услуги Ozon) — из сырых ops", expanded=False):
+        df_srv = extract_services_breakdown_from_ops(ops_now)
+        if df_srv.empty:
+            st.write("В сырых ops нет services (пусто). Тогда твоя 'логистика' должна считаться не из services — нужно искать по operation_type_name/amount.")
         else:
-            df_srv = pd.DataFrame(rows_srv)
-            df_srv["price"] = pd.to_numeric(df_srv["price"], errors="coerce").fillna(0.0)
+            st.write("ИТОГО services_cost:", float(df_srv["cost"].sum()))
+            g_name = (df_srv.groupby("service_name", as_index=False)
+                          .agg(cost=("cost", "sum"), price=("price", "sum"))
+                          .sort_values("cost", ascending=False))
+            st.dataframe(g_name.head(120), use_container_width=True)
 
-            # В ЛК это расходы => часто отрицательные. Покажем и "расход" как положительное число
-            df_srv["cost"] = (-df_srv["price"]).clip(lower=0.0)
-
-            # 1) Разбор по названиям услуг (как приходит от Ozon)
-            g_name = (
-                df_srv.groupby("service_name", as_index=False)
-                      .agg(cost=("cost", "sum"), price=("price", "sum"))
-                      .sort_values("cost", ascending=False)
-            )
-            st.write("ИТОГО services_cost (как участвует в твоей 'логистике'):", float(df_srv["cost"].sum()))
-            st.dataframe(g_name.head(80), use_container_width=True)
-
-            # 2) Разбор, приближенный к колонкам ЛК
-            df_srv["lk_bucket"] = df_srv["service_name"].apply(_lk_service_bucket)
-            g_bucket = (
-                df_srv.groupby("lk_bucket", as_index=False)
-                      .agg(cost=("cost", "sum"))
-                      .sort_values("cost", ascending=False)
-            )
-            st.markdown("**Сводка по категориям ЛК (примерно):**")
-            st.dataframe(g_bucket, use_container_width=True)
-
-            # 3) Поиск потенциальной "лишней" услуги (например ~551 ₽)
-            df_srv["_round"] = df_srv["cost"].round(2)
+            # быстрый фильтр подозрительных ~551 ₽
             suspects = g_name[g_name["cost"].between(500, 600)]
             if not suspects.empty:
-                st.markdown("**Подозрительные услуги ~500–600 ₽ (похоже на твою разницу ~551 ₽):**")
+                st.markdown("**Подозрительные услуги ~500–600 ₽ (ищем разницу ~551 ₽):**")
                 st.dataframe(suspects, use_container_width=True)
 
-            st.caption("Подсказка: если лишние ~551 ₽ сидят в 'Прочие услуги' — значит в твоей 'логистике' лежит не только логистика. Тогда мы вынесем этот service_name в отдельную колонку или исключим из logistics.")
-
+    df_ops = ops_to_df(ops_now)
+    df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
 
     df_ops_prev = pd.DataFrame(columns=df_ops.columns)
     if prev_from <= prev_to:
