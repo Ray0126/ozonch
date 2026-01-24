@@ -991,11 +991,8 @@ def _service_bucket(name: str) -> str:
     return "other"
 
 
-
-def extract_services_breakdown_from_ops(ops: list[dict], sku_whitelist: set[int] | None = None) -> pd.DataFrame:
-    """DEBUG: вытаскивает все services из сырых операций finance (ops list) и распределяет по SKU по весам quantity.
-    Если sku_whitelist задан — оставляет только эти SKU (ускоряет и позволяет разбирать один артикул).
-    """
+def extract_services_breakdown_from_ops(ops: list[dict]) -> pd.DataFrame:
+    """DEBUG: вытаскивает все services из сырых операций finance (ops list)."""
     rows = []
     for op in (ops or []):
         op_id = op.get("operation_id")
@@ -1005,58 +1002,19 @@ def extract_services_breakdown_from_ops(ops: list[dict], sku_whitelist: set[int]
         posting_number = posting.get("posting_number", "")
         delivery_schema = posting.get("delivery_schema", "")
         services = op.get("services") or []
-        items = op.get("items") or []
-
-        # веса по SKU из items
-        weights = []  # list of (sku:int, name:str, w:float)
-        if items:
-            tmp = []
-            total_qty = 0.0
-            for it in items:
-                sku = it.get("sku")
-                if sku is None:
-                    continue
-                try:
-                    sku_int = int(sku)
-                except Exception:
-                    continue
-                q = _to_float(it.get("quantity", 1))
-                if q < 0:
-                    q = 0.0
-                if sku_whitelist is not None and sku_int not in sku_whitelist:
-                    continue
-                total_qty += q
-                tmp.append((sku_int, it.get("name"), q))
-
-            if total_qty > 0 and tmp:
-                for sku_int, name, q in tmp:
-                    weights.append((sku_int, name, q / total_qty))
-
-        # если weights пуст — не можем честно распределить по SKU
-        # в таком случае просто пропускаем (это именно то, что мешает 1-в-1, но для отладки одного артикула лучше пропустить, чем врать)
-        if not weights:
-            continue
-
         for s in services:
             name = s.get("name") or s.get("service_name") or s.get("title") or ""
-            price_total = float(_to_float(s.get("price", 0)))
-            # расходы как +число (обычно price отрицательный)
-            cost_total = float(max(-price_total, 0.0))
-
-            for sku_int, item_name, w in weights:
-                rows.append({
-                    "operation_id": op_id,
-                    "operation_date": op_date,
-                    "type_name": op_type_name,
-                    "posting_number": posting_number,
-                    "delivery_schema": delivery_schema,
-                    "sku": sku_int,
-                    "item_name": item_name,
-                    "service_name": str(name),
-                    "price": price_total * w,
-                    "cost": cost_total * w,
-                })
-
+            price = _to_float(s.get("price", 0))
+            rows.append({
+                "operation_id": op_id,
+                "operation_date": op_date,
+                "type_name": op_type_name,
+                "posting_number": posting_number,
+                "delivery_schema": delivery_schema,
+                "service_name": str(name),
+                "price": float(price),
+                "cost": float(max(-price, 0.0)),  # расходы как +число
+            })
     return pd.DataFrame(rows)
 
 def ops_to_df(ops: list[dict]) -> pd.DataFrame:
@@ -1908,13 +1866,10 @@ with tab1:
     if ops_err_title:
         _block_with_retry(ops_err_title, ops_err_details, cache_clear_fn=load_ops_range.clear)
 
-    # ================== DEBUG: РАЗБОР УСЛУГ (services) ИЗ СЫРЫХ ОПЕРАЦИЙ ==================
-    
-    # ================== DEBUG: РАЗБОР УСЛУГ ДЛЯ ОДНОГО АРТИКУЛА ==================
-    with st.expander("DEBUG: разбор логистики по одному артикулу (Polyarnaya-210)", expanded=False):
-        target_article = "Polyarnaya-210"
 
-        # Пытаемся получить SKU для артикула из cogs_df (если есть)
+    # ================== DEBUG: разбор логистики по одному артикулу (Polyarnaya-210) ==================
+    with st.expander("DEBUG: Polyarnaya-210 — из чего складываются расходы (по operation_type_name)", expanded=False):
+        target_article = "Polyarnaya-210"
         sku_list = []
         try:
             if cogs_df is not None and not cogs_df.empty and "article" in cogs_df.columns and "sku" in cogs_df.columns:
@@ -1925,38 +1880,514 @@ with tab1:
         except Exception:
             sku_list = []
 
-        # Если не нашли SKU через cogs, пробуем через таблицу sold (уже построена ниже)
         if not sku_list:
-            st.write("SKU для артикула не найден в cogs_df. Если в sold появится артикул, проверь, что cogs_df содержит этот артикул → SKU.")
+            st.warning("Не найден SKU для артикула Polyarnaya-210 в cogs_df (нужна связка article→sku).")
         else:
-            st.write("SKU для артикула:", sku_list)
+            st.write("SKU для Polyarnaya-210:", sku_list)
 
-            df_srv = extract_services_breakdown_from_ops(ops_now, sku_whitelist=set(sku_list))
-            if df_srv.empty:
-                st.write("Для этого артикула в сырых ops нет services с items (нечего распределять). Тогда разница может сидеть в операциях без items — будем разбирать по type_name/amount.")
+            # 1) вытаскиваем строки по этому SKU из сырых ops (items -> sku)
+            rows = []
+            for op in (ops_now or []):
+                items = op.get("items") or []
+                hit = False
+                for it in items:
+                    try:
+                        sku = int(it.get("sku"))
+                    except Exception:
+                        continue
+                    if sku in sku_list:
+                        hit = True
+                        break
+                if not hit:
+                    continue
+
+                tname = op.get("operation_type_name", "") or op.get("operation_type", "")
+                otype = op.get("type", "")
+                amt = _to_float(op.get("amount", 0))
+                comm = _to_float(op.get("sale_commission", 0))
+                accr = _to_float(op.get("accruals_for_sale", 0))
+                posting = op.get("posting") or {}
+                pn = posting.get("posting_number", "")
+
+                rows.append({
+                    "type": otype,
+                    "operation_type_name": str(tname),
+                    "posting_number": pn,
+                    "amount": amt,
+                    "sale_commission": comm,
+                    "accruals_for_sale": accr,
+                })
+
+            df_dbg = pd.DataFrame(rows)
+            if df_dbg.empty:
+                st.info("В ops_now не найдено операций с items по этому SKU. Если операции без items — их нужно будет распределять по posting_number.")
             else:
-                st.write("ИТОГО services_cost (по артикулу):", float(df_srv["cost"].sum()))
+                df_dbg["amount"] = pd.to_numeric(df_dbg["amount"], errors="coerce").fillna(0.0)
+                df_dbg["commission_cost"] = (-pd.to_numeric(df_dbg["sale_commission"], errors="coerce").fillna(0.0)).clip(lower=0.0)
 
-                g_name = (df_srv.groupby("service_name", as_index=False)
-                              .agg(cost=("cost", "sum"), price=("price", "sum"))
-                              .sort_values("cost", ascending=False))
-                st.markdown("**Услуги по точным названиям (service_name):**")
-                st.dataframe(g_name, use_container_width=True)
+                # расходы по amount: если amount отрицательный, то это расход
+                df_dbg["amount_cost"] = (-df_dbg["amount"]).clip(lower=0.0)
 
-                # Сводка "примерно как в ЛК"
-                df_srv["lk_bucket"] = df_srv["service_name"].apply(_lk_service_bucket)
-                g_bucket = (df_srv.groupby("lk_bucket", as_index=False)
-                                 .agg(cost=("cost", "sum"))
-                                 .sort_values("cost", ascending=False))
-                st.markdown("**Сводка по категориям ЛК (примерно):**")
-                st.dataframe(g_bucket, use_container_width=True)
+                st.markdown("**Сводка расходов по operation_type_name (из amount):**")
+                g = (df_dbg.groupby("operation_type_name", as_index=False)
+                          .agg(amount_cost=("amount_cost", "sum"),
+                               commission_cost=("commission_cost", "sum"),
+                               amount_sum=("amount", "sum"))
+                          .sort_values("amount_cost", ascending=False))
+                st.dataframe(g, use_container_width=True)
 
-                suspects = g_name[g_name["cost"].between(500, 600)]
-                if not suspects.empty:
-                    st.markdown("**Подозрительные услуги ~500–600 ₽ (ищем разницу ~551 ₽):**")
+                st.markdown("**Подозрительные строки ~500–600 ₽ (ищем разницу ~551 ₽):**")
+                suspects = g[g["amount_cost"].between(500, 600)]
+                if suspects.empty:
+                    st.write("Не найдено категорий в диапазоне 500–600 ₽ по amount. Тогда разница может быть в services_sum или в распределении операций без items.")
+                else:
                     st.dataframe(suspects, use_container_width=True)
 
-        st.caption("Если нужна отладка по другому артикулу — поменяй target_article в коде на нужный.")
+                st.markdown("**Топ операций по posting_number (первые 50 строк):**")
+                st.dataframe(df_dbg.sort_values("amount_cost", ascending=False).head(50), use_container_width=True)
+
+    # ================== DEBUG: РАЗБОР УСЛУГ (services) ИЗ СЫРЫХ ОПЕРАЦИЙ ==================
+    with st.expander("DEBUG: из чего складывается 'Логистика' (услуги Ozon) — из сырых ops", expanded=False):
+        df_srv = extract_services_breakdown_from_ops(ops_now)
+        if df_srv.empty:
+            st.write("В сырых ops нет services (пусто). Тогда твоя 'логистика' должна считаться не из services — нужно искать по operation_type_name/amount.")
+        else:
+            st.write("ИТОГО services_cost:", float(df_srv["cost"].sum()))
+            g_name = (df_srv.groupby("service_name", as_index=False)
+                          .agg(cost=("cost", "sum"), price=("price", "sum"))
+                          .sort_values("cost", ascending=False))
+            st.dataframe(g_name.head(120), use_container_width=True)
+
+            # быстрый фильтр подозрительных ~551 ₽
+            suspects = g_name[g_name["cost"].between(500, 600)]
+            if not suspects.empty:
+                st.markdown("**Подозрительные услуги ~500–600 ₽ (ищем разницу ~551 ₽):**")
+                st.dataframe(suspects, use_container_width=True)
+
+    df_ops = ops_to_df(ops_now)
+    df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
+
+    df_ops_prev = pd.DataFrame(columns=df_ops.columns)
+    if prev_from <= prev_to:
+        ops_prev, ops_prev_err_title, ops_prev_err_details = load_ops_range(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+        if ops_prev_err_title:
+            _block_with_retry(ops_prev_err_title, ops_prev_err_details, cache_clear_fn=load_ops_range.clear)
+        df_ops_prev = ops_to_df(ops_prev)
+        df_ops_prev = redistribute_ops_without_items(df_ops_prev)  # ✅ ДОБАВИТЬ
+
+    sold = build_sold_sku_table(df_ops, cogs_df)
+    sold_prev = build_sold_sku_table(df_ops_prev, cogs_df) if not df_ops_prev.empty else pd.DataFrame()
+
+    k = calc_kpi(df_ops, sold)
+    k_prev = calc_kpi(df_ops_prev, sold_prev)
+
+    ads_now_raw = load_ads_summary(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+    ads_prev_raw = load_ads_summary(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+
+    # Распределение рекламных расходов по артикулам (точнее, чем пропорция выручке)
+    ads_alloc_now = load_ads_spend_by_article(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+    ads_alloc_prev = load_ads_spend_by_article(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+
+    # Берём расход из распределения (total включает __OTHER_ADS__ и совпадает с "как в кабинете")
+    ads_now = {**ads_now_raw}
+    ads_prev = {**ads_prev_raw}
+    ads_now["spent"] = float(ads_alloc_now.get("total", 0.0) or 0.0)
+    ads_prev["spent"] = float(ads_alloc_prev.get("total", 0.0) or 0.0)
+
+    # ---- ROAS ----
+    def calc_roas(ads: dict) -> float:
+        spent = float(ads.get("spent", 0) or 0)
+        revenue = float(ads.get("revenue", 0) or 0)
+        return (revenue / spent) if spent > 0 else 0.0
+
+    roas_now = calc_roas(ads_now)
+    roas_prev = calc_roas(ads_prev)
+
+
+    # ---- OPEX (ручные операционные расходы) ----
+    opex_now = opex_sum_period(df_opex, d_from, d_to)
+    opex_prev = opex_sum_period(df_opex, prev_from, prev_to)
+
+    # note от Performance показываем, но НЕ завязываем на него логику переменных
+    ads_tiles = []
+
+    # note можно показывать отдельно
+    if ads_now.get("_note"):
+        st.info(ads_now["_note"])
+    if ads_alloc_now.get("note"):
+        st.info(ads_alloc_now["note"])
+
+    # ads_tiles формируем ВСЕГДА
+    ads_tiles = [
+        {"title": "Расход на рекламу", "value": money(ads_now.get("spent", 0.0)),
+         "delta": _delta_pct(_to_float(ads_now.get("spent", 0.0)), _to_float(ads_prev.get("spent", 0.0))),
+         "is_expense": True},
+
+        {"title": "Выручка с рекламы", "value": money(ads_now.get("revenue", 0.0)),
+         "delta": _delta_pct(_to_float(ads_now.get("revenue", 0.0)), _to_float(ads_prev.get("revenue", 0.0))),
+         "is_expense": False},
+
+        {"title": "Заказы с рекламы", "value": f'{_to_int(ads_now.get("orders", 0))} шт',
+         "delta": _delta_pct(_to_float(ads_now.get("orders", 0)), _to_float(ads_prev.get("orders", 0))),
+         "is_expense": False},
+
+        {"title": "DRR", "value": f'{_to_float(ads_now.get("drr", 0.0)):.1f}%',
+         "delta": _delta_pct(_to_float(ads_now.get("drr", 0.0)), _to_float(ads_prev.get("drr", 0.0))),
+         "is_expense": True},
+
+        {"title": "ROAS", "value": f'x{roas_now:.2f}',
+         "delta": _delta_pct(roas_now, roas_prev),
+         "is_expense": False},
+
+        {"title": "CPC", "value": f'{_to_float(ads_now.get("cpc", 0.0)):.1f} ₽',
+         "delta": _delta_pct(_to_float(ads_now.get("cpc", 0.0)), _to_float(ads_prev.get("cpc", 0.0))),
+         "is_expense": True},
+
+        {"title": "CTR", "value": f'{_to_float(ads_now.get("ctr", 0.0)):.2f}%',
+         "delta": _delta_pct(_to_float(ads_now.get("ctr", 0.0)), _to_float(ads_prev.get("ctr", 0.0))),
+         "is_expense": False},
+    ]
+
+    sales_tile_value = (
+        f'{money(k["sales_net"])} / {k["qty_orders"]} шт'
+        if k["qty_orders"]
+        else money(k["sales_net"])
+    )
+
+    # --- пересчёт KPI по новым формулам (учитываем рекламу + опер. расходы) ---
+    ads_spent_now = float(ads_now.get("spent", 0.0) or 0.0)
+    ads_spent_prev = float(ads_prev.get("spent", 0.0) or 0.0)
+
+    net_profit_now = float(k["sales_net"]) - float(k["sale_costs"]) - ads_spent_now - float(k["cogs"]) - float(k["tax"]) - float(opex_now)
+    net_profit_prev = float(k_prev["sales_net"]) - float(k_prev["sale_costs"]) - ads_spent_prev - float(k_prev["cogs"]) - float(k_prev["tax"]) - float(opex_prev)
+
+    margin_now = (net_profit_now / float(k["sales_net"]) * 100.0) if float(k["sales_net"]) else 0.0
+    margin_prev = (net_profit_prev / float(k_prev["sales_net"]) * 100.0) if float(k_prev["sales_net"]) else 0.0
+
+    roi_now = (net_profit_now / float(k["cogs"]) * 100.0) if float(k["cogs"]) else 0.0
+    roi_prev = (net_profit_prev / float(k_prev["cogs"]) * 100.0) if float(k_prev["cogs"]) else 0.0
+
+    sales_tile_value = f'{money(k["sales_net"])} / {k["qty_orders"]} шт' if k["qty_orders"] else money(k["sales_net"])
+    commission_delta = _delta_pct(k["commission_cost"], k_prev["commission_cost"])
+
+    tiles = [
+        {"title": "Продажи", "value": sales_tile_value, "delta": _delta_pct(k["sales_net"], k_prev["sales_net"]), "is_expense": False},
+        {"title": "Чистая прибыль", "value": money(net_profit_now), "delta": _delta_pct(net_profit_now, net_profit_prev), "is_expense": False},
+        {"title": "Маржинальность", "value": f"{margin_now:.1f}%", "delta": _delta_pct(margin_now, margin_prev), "is_expense": False},
+        {"title": "ROI", "value": f"{roi_now:.1f}%", "delta": _delta_pct(roi_now, roi_prev), "is_expense": False},
+
+        {"title": "% выкупа", "value": f'{k["buyout_pct"]:.1f}%', "delta": _delta_pct(k["buyout_pct"], k_prev["buyout_pct"]), "is_expense": False},
+        {"title": "Возвраты, шт", "value": str(k["qty_returns"]), "delta": _delta_pct(k["qty_returns"], k_prev["qty_returns"]), "is_expense": True},
+        {"title": "Опер. расходы", "value": money(opex_now), "delta": _delta_pct(opex_now, opex_prev), "is_expense": True},
+        {"title": "Расходы на продажу", "value": money(k["sale_costs"]), "delta": _delta_pct(k["sale_costs"], k_prev["sale_costs"]), "is_expense": True},
+
+        {"title": "Хранение (FBO)", "value": money(k["storage_fbo"]), "delta": _delta_pct(k["storage_fbo"], k_prev["storage_fbo"]), "is_expense": True},
+        {"title": "Себестоимость продаж", "value": money(k["cogs"]), "delta": _delta_pct(k["cogs"], k_prev["cogs"]), "is_expense": True, "good_when_up": True},
+        {"title": "Налоги/Комиссия", "value": f'{money(k["tax"])} / {money(k["commission_cost"])}', "delta": commission_delta, "is_expense": True},
+    ]
+
+    st.markdown("### Ключевые показатели")
+    render_tiles(tiles, cols_per_row=4)
+
+    st.markdown("### Рекламные показатели")
+    render_tiles(ads_tiles, cols_per_row=4)
+
+    st.divider()
+
+    over = df_ops[df_ops["sku"].isna()].copy()
+    with st.expander("Детали", expanded=False):
+        st.markdown("**Данные по операциям**")
+        if over.empty:
+            st.info("Нет операций без SKU в выбранном периоде.")
+        else:
+            over_g = (
+                over.groupby("type_name", as_index=False)
+                .agg(amount=("amount", "sum"))
+                .sort_values("amount")
+            )
+            over_g = over_g.rename(columns={"type_name": "Тип операции", "amount": "Значение"}).copy()
+            # оставляем число числом — чтобы сортировка работала корректно
+            over_g["Значение"] = pd.to_numeric(over_g["Значение"], errors="coerce").fillna(0.0)
+            st.dataframe(
+                over_g,
+                use_container_width=True,
+                hide_index=True,
+                column_config={"Значение": st.column_config.NumberColumn(format="%.0f")},
+            )
+
+    st.markdown("## Список проданных SKU ")
+    if sold is None or sold.empty:
+        st.warning("За выбранный период нет SKU-операций (items[].sku).")
+    else:
+        total_tax = float(sold["accruals_net"].sum()) * 0.06
+
+        # распределяем: налог, реклама, опер. расходы
+        sold_view = allocate_tax_by_share(sold, total_tax)
+
+        ads_spent_now = float(ads_now.get("spent", 0.0) or 0.0)
+        sold_view = allocate_ads_by_article(sold_view, ads_alloc_now.get("by_article", {}))
+
+        # Опер. расходы распределяем пропорционально выручке SKU
+        opex_period = opex_sum_period(df_opex, d_from, d_to)
+        sold_view = allocate_cost_by_share(sold_view, opex_period, "opex_total")
+
+        # прибыльные метрики по новым формулам
+        sold_view = compute_profitability(sold_view)
+
+        show = sold_view.copy()
+        show = show.rename(columns={
+            "article": "Артикул",
+            "sku": "SKU",
+            "name": "Название",
+            "qty_orders": "Заказы, шт",
+            "qty_returns": "Возвраты, шт",
+            "qty_buyout": "Выкуп, шт",
+            "accruals_net": "Выручка, ₽",
+            "commission": "Комиссия, ₽",
+            "logistics": "Услуги/логистика, ₽",
+            "sale_costs": "Расходы Ozon, ₽",
+            "ads_total": "Реклама, ₽",
+            "cogs_unit": "Себестоимость 1 шт, ₽",
+            "cogs_total": "Себестоимость всего, ₽",
+            "tax_total": "Налог, ₽",
+            "opex_total": "Опер. расходы, ₽",
+            "profit": "Прибыль, ₽",
+            "profit_per_unit": "Прибыль на 1 шт, ₽",
+            "margin_%": "Маржинальность, %",
+            "roi_%": "ROI, %",
+        })
+
+
+        # === Доп. колонки для витрины (как на Ozon) ===
+        show["% выкупа"] = show.apply(
+            lambda r: (float(r.get("Выкуп, шт", 0)) / float(r.get("Заказы, шт", 0)) * 100.0)
+            if float(r.get("Заказы, шт", 0) or 0) else 0.0,
+            axis=1,
+        )
+        show["Средняя цена продажи, ₽"] = show.apply(
+            lambda r: (float(r.get("Выручка, ₽", 0)) / float(r.get("Выкуп, шт", 0)))
+            if float(r.get("Выкуп, шт", 0) or 0) else 0.0,
+            axis=1,
+        )
+        show["ДРР, %"] = show.apply(
+            lambda r: (float(r.get("Реклама, ₽", 0)) / float(r.get("Выручка, ₽", 0)) * 100.0)
+            if float(r.get("Выручка, ₽", 0) or 0) else 0.0,
+            axis=1,
+        )
+
+        # порядок колонок
+        cols = [
+            "Артикул","SKU","Название",
+            "Заказы, шт","Возвраты, шт","Выкуп, шт","% выкупа",
+            "Выручка, ₽","Средняя цена продажи, ₽","ДРР, %",
+            "Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
+            "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
+            "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
+        ]
+        for c in cols:
+            if c not in show.columns:
+                show[c] = 0.0
+        show = show[cols].copy()
+        show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
+        # Сортировка должна работать корректно => оставляем числовые типы
+        # Числа приводим, но НЕ форматируем в строки
+        int_cols = ["Заказы, шт","Возвраты, шт","Выкуп, шт"]
+        for c in int_cols:
+            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0).astype(int)
+
+        money_cols = [
+            "Выручка, ₽","Средняя цена продажи, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
+            "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
+            "Прибыль, ₽","Прибыль на 1 шт, ₽",
+        ]
+        for c in money_cols:
+            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
+
+        pct_cols = ["% выкупа","ДРР, %","Маржинальность, %","ROI, %"]
+        for c in pct_cols:
+            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
+
+
+
+        # --- Настройка порядка/видимости колонок (простое решение без компонентов) ---
+        # Важно: в Streamlit нет drag&drop перестановки колонок в st.dataframe,
+        # поэтому делаем лёгкий UI: выбрать колонку и двигать вверх/вниз + скрывать.
+        default_cols = list(show.columns)
+        order_key = "soldsku_col_order"
+        hide_key = "soldsku_col_hidden"
+
+        # Сохранение настроек (порядок/скрытые) в URL query params,
+        # чтобы переживало F5 и повторный заход по ссылке.
+        qp_order_key = "soldsku_cols"
+        qp_hide_key = "soldsku_hide"
+
+        def _qp_get_one(key: str) -> str:
+            """Безопасно читаем query param как строку (поддержка разных версий Streamlit)."""
+            try:
+                # Streamlit 1.30+: st.query_params
+                qp = getattr(st, "query_params", None)
+                if qp is not None:
+                    v = qp.get(key)
+                    if isinstance(v, list):
+                        return str(v[0]) if v else ""
+                    return str(v) if v is not None else ""
+            except Exception:
+                pass
+
+            try:
+                # Старые версии: experimental_get_query_params
+                qp2 = st.experimental_get_query_params()
+                v = qp2.get(key, [])
+                return str(v[0]) if v else ""
+            except Exception:
+                return ""
+
+        def _qp_set(**kwargs):
+            """Безопасно пишем query params (старая/новая API)."""
+            try:
+                qp = getattr(st, "query_params", None)
+                if qp is not None:
+                    for k, v in kwargs.items():
+                        qp[k] = v
+                    return
+            except Exception:
+                pass
+            try:
+                st.experimental_set_query_params(**kwargs)
+            except Exception:
+                pass
+
+        # 1) Пробуем подхватить сохранённый порядок/скрытые из URL (переживает F5)
+        qp_cols = _qp_get_one(qp_order_key).strip()
+        qp_hide = _qp_get_one(qp_hide_key).strip()
+        if qp_cols and (order_key not in st.session_state):
+            cols = [c for c in qp_cols.split(",") if c]
+            st.session_state[order_key] = cols
+        if qp_hide and (hide_key not in st.session_state):
+            hidden = [c for c in qp_hide.split(",") if c]
+            st.session_state[hide_key] = hidden
+
+        if order_key not in st.session_state or not isinstance(st.session_state[order_key], list):
+            st.session_state[order_key] = default_cols
+        if hide_key not in st.session_state or not isinstance(st.session_state[hide_key], list):
+            st.session_state[hide_key] = []
+
+        # если появились/исчезли колонки — аккуратно синхронизируем
+        cur = [c for c in st.session_state[order_key] if c in default_cols]
+        for c in default_cols:
+            if c not in cur:
+                cur.append(c)
+        st.session_state[order_key] = cur
+        st.session_state[hide_key] = [c for c in st.session_state[hide_key] if c in default_cols]
+
+        # Держим блок настроек колонок открытым после кликов (Streamlit делает rerun)
+        if "soldsku_cols_expanded" not in st.session_state:
+            st.session_state["soldsku_cols_expanded"] = True
+        if "soldsku_last_col" not in st.session_state:
+            st.session_state["soldsku_last_col"] = ""
+
+        with st.expander("⚙️ Колонки таблицы", expanded=st.session_state.get("soldsku_cols_expanded", False)):
+            colA, colB, colC = st.columns([2.2, 1.2, 1.6])
+
+            with colA:
+                # запоминаем последний выбранный столбец, чтобы после rerun не сбивалось
+                _last = st.session_state.get("soldsku_col_picked")
+                _idx = 0
+                try:
+                    if _last in st.session_state[order_key]:
+                        _idx = st.session_state[order_key].index(_last)
+                except Exception:
+                    _idx = 0
+
+                picked = st.selectbox(
+                    "Колонка",
+                    options=st.session_state[order_key],
+                    index=_idx if st.session_state[order_key] else 0,
+                    key="soldsku_col_picked",
+                )
+
+            with colB:
+                left = st.button("⬅️ Влево", use_container_width=True)
+                right = st.button("➡️ Вправо", use_container_width=True)
+
+            with colC:
+                c1, c2 = st.columns([1.2, 1.0])
+                with c1:
+                    if st.button("💾 Сохранить", use_container_width=True):
+                        # сохраняем порядок/скрытые в URL (переживает F5)
+                        try:
+                            order_str = ",".join(st.session_state[order_key])
+                            hide_str = ",".join(st.session_state[hide_key])
+                            _qp_set(**{qp_order_key: order_str, qp_hide_key: hide_str})
+                            st.success("Сохранено")
+                        except Exception:
+                            st.warning("Не удалось сохранить в URL")
+                with c2:
+                    if st.button("↩️ Сбросить", use_container_width=True):
+                        st.session_state[order_key] = default_cols
+                        st.session_state[hide_key] = []
+                        try:
+                            _qp_set(**{qp_order_key: "", qp_hide_key: ""})
+                        except Exception:
+                            pass
+                        st.rerun()
+
+            if picked and (left or right):
+                st.session_state["soldsku_cols_expanded"] = True
+                st.session_state["soldsku_last_col"] = picked
+                cols = st.session_state[order_key]
+                i = cols.index(picked)
+                j = i - 1 if left else i + 1
+                if 0 <= j < len(cols):
+                    cols[i], cols[j] = cols[j], cols[i]
+                    st.session_state[order_key] = cols
+                    # Автосохранение в URL, чтобы переживало перезагрузку страницы
+                    try:
+                        _qp_set(**{qp_order_key: ",".join(st.session_state[order_key]), qp_hide_key: ",".join(st.session_state[hide_key])})
+                    except Exception:
+                        pass
+                    st.rerun()
+
+            st.session_state[hide_key] = st.multiselect(
+                "Скрыть колонки",
+                options=st.session_state[order_key],
+                default=st.session_state[hide_key],
+                key="soldsku_col_hidden_ui",
+            )
+
+        visible_cols = [c for c in st.session_state[order_key] if c not in set(st.session_state[hide_key])]
+        if visible_cols:
+            show = show[visible_cols]
+
+        st.dataframe(
+            show,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Заказы, шт": st.column_config.NumberColumn(format="%.0f"),
+                "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
+                "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
+                **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols},
+                "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
+                "ROI, %": st.column_config.NumberColumn(format="%.1f"),
+            }
+        )
+
+        st.download_button(
+            "Скачать XLSX (таблица проданных SKU)",
+            data=export_soldsku_xlsx(show),
+            file_name=f"ozon_soldsku_{d_from.strftime('%Y-%m-%d')}_{d_to.strftime('%Y-%m-%d')}.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+
+
+
+
+# ================== TAB 4 (OPEX) ==================
+with tab4:
+    st.subheader("Операционные расходы")
+    st.caption("Ручные операционные расходы (не из Ozon). Они учитываются в прибыли и распределяются по SKU пропорционально выручке за выбранный период.")
 
     opex = load_opex()
     types_saved = load_opex_types()
