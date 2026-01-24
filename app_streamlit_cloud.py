@@ -1121,7 +1121,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     # DEBUG: прикрепляем услуги (для разбора логистики/эквайринга/обработки)
     try:
-        df.attrs[\"service_rows\"] = service_rows
+        df.attrs["service_rows"] = service_rows
     except Exception:
         pass
     return df
