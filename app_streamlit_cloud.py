@@ -972,6 +972,18 @@ if uploaded is not None:
         st.sidebar.error(f"Не смог прочитать файл: {e}")
 
 # ================== OPS -> DF ==================
+def # ================== OPS -> DF ==================
+def _service_bucket(name: str) -> str:
+    n = (name or "").lower()
+    # Баллы за скидки
+    if ("балл" in n and "скид" in n) or ("bonus" in n and "discount" in n):
+        return "bonus"
+    # Программы партнёров
+    if ("партн" in n) or ("partner" in n):
+        return "partner"
+    return "other"
+
+
 def ops_to_df(ops: list[dict]) -> pd.DataFrame:
     rows = []
     for op in ops:
@@ -991,7 +1003,23 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
 
         items = op.get("items") or []
         services = op.get("services") or []
-        services_sum_total = sum(_to_float(s.get("price", 0)) for s in services)
+
+        # --- услуги: общий + разрез на "баллы/партнерки/прочее"
+        services_total = 0.0
+        bonus_sum = 0.0
+        partner_sum = 0.0
+
+        for s in services:
+            price = _to_float(s.get("price", 0))
+            services_total += price
+            sname = s.get("name") or s.get("service_name") or s.get("title") or ""
+            b = _service_bucket(str(sname))
+            if b == "bonus":
+                bonus_sum += price
+            elif b == "partner":
+                partner_sum += price
+
+        services_other = services_total - bonus_sum - partner_sum
 
         base = {
             "operation_id": op_id,
@@ -1004,6 +1032,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
         }
 
         if not items:
+            # items пусто — оставляем строку, потом распределим по SKU по posting_number
             rows.append({
                 **base,
                 "sku": None,
@@ -1011,7 +1040,9 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "qty": 0.0,
                 "accruals_for_sale": accruals_total,
                 "sale_commission": commission_total,
-                "services_sum": services_sum_total,
+                "services_sum": services_other,
+                "bonus_points": bonus_sum,
+                "partner_programs": partner_sum,
                 "amount": amount_total,
             })
             continue
@@ -1031,15 +1062,101 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "qty": q,
                 "accruals_for_sale": accruals_total * w,
                 "sale_commission": commission_total * w,
-                "services_sum": services_sum_total * w,
+                "services_sum": services_other * w,
+                "bonus_points": bonus_sum * w,
+                "partner_programs": partner_sum * w,
                 "amount": amount_total * w,
             })
 
     df = pd.DataFrame(rows)
-    for c in ["accruals_for_sale", "sale_commission", "services_sum", "amount", "qty"]:
+    for c in ["accruals_for_sale", "sale_commission", "services_sum", "bonus_points", "partner_programs", "amount", "qty"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     return df
+
+def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
+    """
+    Распределяет строки, где sku=None (items пустые), по SKU внутри того же posting_number,
+    используя веса по qty из строк этого же posting_number, где sku уже известен.
+    Суммы сохраняются 1-в-1, просто перестают висеть в "sku=None".
+    """
+    if df_ops is None or df_ops.empty:
+        return df_ops
+
+    df = df_ops.copy()
+
+    need = df["sku"].isna() & df["posting_number"].astype(str).str.strip().ne("")
+    if not need.any():
+        return df
+
+    has = df["sku"].notna() & df["posting_number"].astype(str).str.strip().ne("")
+    if not has.any():
+        return df
+
+    # веса по qty внутри posting_number и sku
+    wbase = (
+        df.loc[has, ["posting_number", "sku", "name", "qty"]]
+        .copy()
+    )
+    wbase["sku"] = pd.to_numeric(wbase["sku"], errors="coerce")
+    wbase = wbase.dropna(subset=["sku"])
+    if wbase.empty:
+        return df
+
+    wbase["qty"] = pd.to_numeric(wbase["qty"], errors="coerce").fillna(0.0).clip(lower=0.0)
+    w = (
+        wbase.groupby(["posting_number", "sku"], as_index=False)
+        .agg(w_qty=("qty", "sum"), name=("name", "first"))
+    )
+    # нормируем веса внутри posting_number
+    w["w_sum"] = w.groupby("posting_number")["w_qty"].transform("sum")
+    w = w[w["w_sum"] > 0].copy()
+    if w.empty:
+        return df
+    w["weight"] = w["w_qty"] / w["w_sum"]
+
+    # строки без items
+    miss = df.loc[need].copy()
+    keep = df.loc[~need].copy()
+
+    out_rows = [keep]
+
+    # разворачиваем miss по sku из w
+    for _, r in miss.iterrows():
+        pn = str(r.get("posting_number", "")).strip()
+        ww = w[w["posting_number"] == pn]
+        if ww.empty:
+            # не нашли куда распределить — оставляем как было
+            out_rows.append(pd.DataFrame([r]))
+            continue
+
+        for _, wr in ww.iterrows():
+            k = float(wr["weight"])
+            newr = r.copy()
+            newr["sku"] = int(wr["sku"])
+            if pd.isna(newr.get("name")) or str(newr.get("name")).strip() == "":
+                newr["name"] = wr.get("name")
+
+            # qty: если это orders/returns — распределяем qty как w_qty
+            # (если qty в исходной строке = 0, это нормально — берем w_qty)
+            if str(newr.get("type")) in ("orders", "returns"):
+                newr["qty"] = float(wr["w_qty"])
+
+            # суммы распределяем по весу
+            for c in ["accruals_for_sale", "sale_commission", "services_sum", "bonus_points", "partner_programs", "amount"]:
+                newr[c] = _to_float(newr.get(c, 0)) * k
+
+            out_rows.append(pd.DataFrame([newr]))
+
+    out = pd.concat(out_rows, ignore_index=True)
+
+    # финальная чистка типов
+    for c in ["accruals_for_sale", "sale_commission", "services_sum", "bonus_points", "partner_programs", "amount", "qty"]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
+
+    return out
+
 
 # ================== MONTH-SAFE CHUNK LOADER ==================
 def month_safe_chunks(d_from: date, d_to: date):
@@ -1432,27 +1549,41 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df = sku_df.dropna(subset=["sku"]).copy()
     sku_df["sku"] = sku_df["sku"].astype(int)
 
+    # расходы (в API обычно минусом)
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
 
+    # отдельно “Баллы за скидки” и “Программы партнёров”
+    sku_df["bonus_cost"] = (-sku_df.get("bonus_points", 0)).clip(lower=0.0)
+    sku_df["partner_cost"] = (-sku_df.get("partner_programs", 0)).clip(lower=0.0)
+
+    # количества
     sku_df["qty_orders"] = sku_df.apply(lambda r: r["qty"] if r["type"] == "orders" else 0.0, axis=1)
     sku_df["qty_returns"] = sku_df.apply(lambda r: r["qty"] if r["type"] == "returns" else 0.0, axis=1)
 
     g = (
-        sku_df.groupby(["sku", "name"], as_index=False, dropna=False)
+        sku_df.groupby(["sku"], as_index=False)
         .agg(
+            name=("name", "first"),
             qty_orders=("qty_orders", "sum"),
             qty_returns=("qty_returns", "sum"),
-            accruals_net=("accruals_for_sale", "sum"),
+            gross_sales=("accruals_for_sale", "sum"),
             amount_net=("amount", "sum"),
             commission=("commission_cost", "sum"),
             logistics=("services_cost", "sum"),
+            bonus_points=("bonus_cost", "sum"),
+            partner_programs=("partner_cost", "sum"),
         )
     )
 
     g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
+
+    # ВАЖНО: “Выручка” как в ЛК = GrossSales - Баллы - Партнерки
+    g["accruals_net"] = g["gross_sales"] - g["bonus_points"] - g["partner_programs"]
+
     g["sale_costs"] = g["commission"] + g["logistics"]
 
+    # COGS
     if cogs_df_local is None or cogs_df_local.empty:
         g["article"] = ""
         g["cogs_unit"] = 0.0
@@ -1471,8 +1602,7 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
         g["article"] = g["article"].fillna("").astype(str)
         g["cogs_unit"] = pd.to_numeric(g["cogs_unit"], errors="coerce").fillna(0.0)
 
-
-    # --- заполнение пустых артикулов по совпадению названия товара ---
+    # автозаполнение артикулов по названию (оставляем как было)
     try:
         known = g[(g["article"].astype(str).str.strip() != "") & g["name"].notna()].copy()
         if not known.empty:
@@ -1492,8 +1622,10 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     g["article"] = g["article"].fillna("").astype(str)
 
     g["cogs_total"] = (g["qty_buyout"].clip(lower=0.0) * g["cogs_unit"]).fillna(0.0)
+
     g = g.sort_values("accruals_net", ascending=False)
     return g
+
 
 def allocate_tax_by_share(sku_table: pd.DataFrame, total_tax: float) -> pd.DataFrame:
     out = sku_table.copy()
@@ -1699,6 +1831,7 @@ with tab1:
     if ops_err_title:
         _block_with_retry(ops_err_title, ops_err_details, cache_clear_fn=load_ops_range.clear)
     df_ops = ops_to_df(ops_now)
+    df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
 
     df_ops_prev = pd.DataFrame(columns=df_ops.columns)
     if prev_from <= prev_to:
@@ -1706,6 +1839,7 @@ with tab1:
         if ops_prev_err_title:
             _block_with_retry(ops_prev_err_title, ops_prev_err_details, cache_clear_fn=load_ops_range.clear)
         df_ops_prev = ops_to_df(ops_prev)
+        df_ops_prev = redistribute_ops_without_items(df_ops_prev)  # ✅ ДОБАВИТЬ
 
     sold = build_sold_sku_table(df_ops, cogs_df)
     sold_prev = build_sold_sku_table(df_ops_prev, cogs_df) if not df_ops_prev.empty else pd.DataFrame()
