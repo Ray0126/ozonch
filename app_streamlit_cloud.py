@@ -1050,6 +1050,11 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
         accruals_total = _to_float(op.get("accruals_for_sale", 0))
         commission_total = _to_float(op.get("sale_commission", 0))
         amount_total = _to_float(op.get("amount", 0))
+        
+        # Эквайринг как отдельная операция (из amount)
+        is_acq_op = ("эквайринг" in str(op_type_name).lower()) or ("acquiring" in str(op_type_name).lower())
+        acquiring_total = amount_total if is_acq_op else 0.0
+
 
         posting = op.get("posting") or {}
         posting_number = posting.get("posting_number", "")
@@ -1102,6 +1107,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "accruals_for_sale": accruals_total,
                 "sale_commission": commission_total,
                 "services_sum": services_other,
+                "acquiring_amount": acquiring_total,
                 "bonus_points": bonus_sum,
                 "partner_programs": partner_sum,
                 "amount": amount_total,
@@ -1124,6 +1130,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "accruals_for_sale": accruals_total * w,
                 "sale_commission": commission_total * w,
                 "services_sum": services_other * w,
+                "acquiring_amount": acquiring_total * w,
                 "bonus_points": bonus_sum * w,
                 "partner_programs": partner_sum * w,
                 "amount": amount_total * w,
@@ -1616,9 +1623,8 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
     
     # Эквайринг считаем отдельно по amount (как в ЛК)
-    tn = sku_df.get("type_name", "").astype(str).str.lower()
-    sku_df["acquiring_cost"] = 0.0
-    mask_acq = tn.str.contains("эквайринг", na=False) | tn.str.contains("acquiring", na=False)
+    
+    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_amount", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
 
     # amount в таких операциях обычно отрицательный => расход = -amount
     sku_df.loc[mask_acq, "acquiring_cost"] = (-pd.to_numeric(sku_df.loc[mask_acq, "amount"], errors="coerce").fillna(0.0)).clip(lower=0.0)
