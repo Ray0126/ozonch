@@ -1614,6 +1614,15 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # расходы (в API обычно минусом)
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
+    
+    # Эквайринг считаем отдельно по amount (как в ЛК)
+    tn = sku_df.get("type_name", "").astype(str).str.lower()
+    sku_df["acquiring_cost"] = 0.0
+    mask_acq = tn.str.contains("эквайринг", na=False) | tn.str.contains("acquiring", na=False)
+
+    # amount в таких операциях обычно отрицательный => расход = -amount
+    sku_df.loc[mask_acq, "acquiring_cost"] = (-pd.to_numeric(sku_df.loc[mask_acq, "amount"], errors="coerce").fillna(0.0)).clip(lower=0.0)
+
 
     # отдельно “Баллы за скидки” и “Программы партнёров”
     sku_df["bonus_cost"] = (-sku_df.get("bonus_points", 0)).clip(lower=0.0)
@@ -1632,6 +1641,7 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
             gross_sales=("accruals_for_sale", "sum"),
             amount_net=("amount", "sum"),
             commission=("commission_cost", "sum"),
+            acquiring=("acquiring_cost", "sum"),
             logistics=("services_cost", "sum"),
             bonus_points=("bonus_cost", "sum"),
             partner_programs=("partner_cost", "sum"),
@@ -1643,7 +1653,7 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # ВАЖНО: “Выручка” как в ЛК = GrossSales - Баллы - Партнерки
     g["accruals_net"] = g["gross_sales"] - g["bonus_points"] - g["partner_programs"]
 
-    g["sale_costs"] = g["commission"] + g["logistics"]
+    g["sale_costs"] = g["commission"] + g["logistics"] + g["acquiring"]
 
     # COGS
     if cogs_df_local is None or cogs_df_local.empty:
