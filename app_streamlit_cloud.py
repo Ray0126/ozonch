@@ -2535,8 +2535,8 @@ with tab1:
             "Прибыль, ₽","Прибыль на 1 шт, ₽",
         ]
         for c in money_cols:
-        if c in show.columns:
-            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
+            if c in show.columns:
+                show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
         pct_cols = ["% выкупа","ДРР, %","Маржинальность, %","ROI, %"]
         for c in pct_cols:
