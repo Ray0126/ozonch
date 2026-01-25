@@ -7,102 +7,6 @@ import streamlit as st
 import pandas as pd
 
 
-
-
-def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
-    """Эквайринг по SKU за период (как в ЛК).
-    Ищем finance-операции с operation_type_name/type_name = 'Оплата эквайринга' (или содержит 'эквайринг').
-    Считаем NET по amount (учитываем сторно/плюсовые строки): расход = max(-sum(amount), 0).
-    Если строка без SKU — распределяем внутри posting_number по SKU пропорционально accruals_for_sale (если есть), иначе поровну.
-    Возвращает df с колонкой acquiring_cost на строках с SKU.
-    """
-    if df_ops is None or df_ops.empty:
-        return df_ops
-
-    df = df_ops.copy()
-    if "acquiring_cost" not in df.columns:
-        df["acquiring_cost"] = 0.0
-
-    tn_col = "operation_type_name" if "operation_type_name" in df.columns else ("type_name" if "type_name" in df.columns else None)
-    if tn_col is None or "amount" not in df.columns:
-        return df
-
-    tn = df[tn_col].astype(str).str.lower()
-    mask_acq = tn.str.contains("оплата эквайринга", na=False) | tn.str.contains("эквайринг", na=False) | tn.str.contains("acquiring", na=False)
-    if not mask_acq.any():
-        return df
-
-    amount = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-
-    # Если нет posting_number — только прямые строки с SKU
-    if "posting_number" not in df.columns:
-        direct = mask_acq & df["sku"].notna()
-        if direct.any():
-            tmp = df.loc[direct, ["sku"]].copy()
-            tmp["amount"] = amount[direct].values
-            net = tmp.groupby("sku")["amount"].sum()
-            # добавим на первую строку каждого SKU
-            for sku, amt_sum in net.items():
-                idx = df.index[df["sku"] == sku]
-                if len(idx) > 0:
-                    df.loc[idx[0], "acquiring_cost"] += float(max(-amt_sum, 0.0))
-        return df
-
-    # 1) прямые строки с SKU: NET по (posting_number, sku)
-    direct = mask_acq & df["sku"].notna() & df["posting_number"].astype(str).ne("")
-    if direct.any():
-        tmp = df.loc[direct, ["posting_number", "sku"]].copy()
-        tmp["amount"] = amount[direct].values
-        net = tmp.groupby(["posting_number", "sku"], as_index=False)["amount"].sum()
-        net["acq_cost"] = net["amount"].apply(lambda x: float(max(-x, 0.0)))
-
-        key = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
-        key["idx"] = key.index.values
-        net2 = net.merge(key, on=["posting_number", "sku"], how="left").dropna(subset=["idx"])
-        if not net2.empty:
-            df.loc[net2["idx"].astype(int).values, "acquiring_cost"] += net2["acq_cost"].astype(float).values
-
-    # 2) строки без SKU: NET по posting_number и распределение
-    und = mask_acq & df["sku"].isna() & df["posting_number"].astype(str).ne("")
-    if not und.any():
-        return df
-
-    acq_post = df.loc[und, ["posting_number"]].copy()
-    acq_post["amount"] = amount[und].values
-    acq_sum = acq_post.groupby("posting_number", as_index=False)["amount"].sum()
-    acq_sum["acq_cost"] = acq_sum["amount"].apply(lambda x: float(max(-x, 0.0)))
-    acq_sum = acq_sum[acq_sum["acq_cost"] > 0]
-    if acq_sum.empty:
-        return df
-
-    base = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
-    if base.empty:
-        return df
-
-    if "accruals_for_sale" in df.columns:
-        w = pd.to_numeric(df.loc[base.index, "accruals_for_sale"], errors="coerce").fillna(0.0).abs()
-        base["w"] = w.values
-        base.loc[base["w"] <= 0, "w"] = 1.0
-    else:
-        base["w"] = 1.0
-
-    base["w_sum"] = base.groupby("posting_number")["w"].transform("sum")
-    base["share"] = base["w"] / base["w_sum"]
-
-    alloc = base.merge(acq_sum[["posting_number", "acq_cost"]], on="posting_number", how="inner")
-    if alloc.empty:
-        return df
-    alloc["acq_alloc"] = alloc["acq_cost"] * alloc["share"]
-
-    key = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
-    key["idx"] = key.index.values
-    alloc2 = alloc.merge(key, on=["posting_number", "sku"], how="left").dropna(subset=["idx"])
-    if alloc2.empty:
-        return df
-
-    df.loc[alloc2["idx"].astype(int).values, "acquiring_cost"] += alloc2["acq_alloc"].astype(float).values
-    return df
-
 def allocate_acquiring_amount_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
     """Распределяет acquiring_amount (amount по операциям эквайринга) по SKU на уровне posting_number.
 
@@ -1750,6 +1654,160 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
     }
     return out
 
+
+
+@st.cache_data(ttl=600)
+def load_ads_payperorder_by_sku(date_from_str: str, date_to_str: str) -> dict:
+    """Оплата за заказ (CPA) по SKU за период через Performance API products report.
+
+    Источник:
+      - POST /api/client/statistic/products/generate  (RFC3339 from/to)
+      - GET  /api/client/statistics/report?UUID=...
+
+    Возвращает:
+      {
+        "by_sku": {<sku:int>: <spend_order:float>},
+        "total": float,
+        "note": str
+      }
+    """
+    out = {"by_sku": {}, "total": 0.0, "note": ""}
+
+    perf_id = _get_setting("PERF_CLIENT_ID", "").strip()
+    perf_secret = _get_setting("PERF_CLIENT_SECRET", "").strip()
+    if not perf_id or not perf_secret:
+        out["note"] = "Performance: PERF_CLIENT_ID / PERF_CLIENT_SECRET не заданы — 'Оплата за заказ' недоступна."
+        return out
+
+    BASE = "https://api-performance.ozon.ru/api/client"
+
+    def _get_token() -> str:
+        r = requests.post(
+            f"{BASE}/token",
+            json={
+                "client_id": int(perf_id) if str(perf_id).isdigit() else perf_id,
+                "client_secret": perf_secret,
+                "grant_type": "client_credentials",
+            },
+            timeout=30,
+        )
+        r.raise_for_status()
+        data = r.json()
+        token = data.get("access_token")
+        if not token:
+            raise RuntimeError(f"Не получил access_token: {data}")
+        return token
+
+    def _headers(token: str) -> dict:
+        return {"Authorization": f"Bearer {token}", "Accept": "*/*", "User-Agent": "ozon-ads-dashboard/1.0"}
+
+    def _parse_ru_money(s: str) -> float:
+        s = (s or "").strip().replace("\ufeff", "").replace("\xa0", "").replace(" ", "").replace(",", ".")
+        try:
+            return float(s)
+        except Exception:
+            return 0.0
+
+    def _pick_col(cols: list[str], *needles: str) -> str:
+        cols_l = [c.lower() for c in cols]
+        for i, cl in enumerate(cols_l):
+            if all(n.lower() in cl for n in needles):
+                return cols[i]
+        return ""
+
+    def _generate_uuid(token: str, from_rfc3339: str, to_rfc3339: str) -> str:
+        r = requests.post(
+            f"{BASE}/statistic/products/generate",
+            headers=_headers(token),
+            json={"from": from_rfc3339, "to": to_rfc3339},
+            timeout=60,
+        )
+        r.raise_for_status()
+        data = r.json()
+        uuid = data.get("UUID") or data.get("uuid")
+        if not uuid:
+            raise RuntimeError(f"Не получил UUID отчёта: {data}")
+        return str(uuid)
+
+    def _download_csv(token: str, uuid: str) -> str:
+        # Пока отчёт не готов, бывает 404/409 — ждём
+        import time as _time
+        last_err = None
+        for _ in range(35):  # ~ до 70 сек при sleep=2
+            rr = requests.get(
+                f"{BASE}/statistics/report",
+                headers=_headers(token),
+                params={"UUID": uuid},
+                timeout=90,
+            )
+            if rr.status_code in (404, 409):
+                last_err = rr.status_code
+                _time.sleep(2.0)
+                continue
+            if rr.status_code >= 400:
+                last_err = f"{rr.status_code} {rr.text[:200]}"
+                _time.sleep(2.0)
+                continue
+            return rr.text
+        raise RuntimeError(f"Не удалось скачать report UUID={uuid} (last={last_err})")
+
+    def _iter_days(d1, d2):
+        cur = d1
+        while cur <= d2:
+            yield cur
+            cur = cur + timedelta(days=1)
+
+    # --- основной цикл по дням (самый надёжный режим) ---
+    d1 = datetime.strptime(date_from_str, "%Y-%m-%d").date()
+    d2 = datetime.strptime(date_to_str, "%Y-%m-%d").date()
+    token = _get_token()
+
+    import csv as _csv
+    for day in _iter_days(d1, d2):
+        # RFC3339 (UTC) — достаточно для отчёта за день
+        from_ts = f"{day.isoformat()}T00:00:00Z"
+        to_ts = f"{day.isoformat()}T23:59:59Z"
+
+        uuid = _generate_uuid(token, from_ts, to_ts)
+        csv_text = _download_csv(token, uuid)
+
+        lines = (csv_text or "").splitlines()
+        if not lines:
+            continue
+        if lines[0].startswith("\ufeff"):
+            lines[0] = lines[0].replace("\ufeff", "")
+
+        reader = _csv.DictReader(lines, delimiter=";")
+        cols = reader.fieldnames or []
+        if not cols:
+            continue
+
+        col_sku = _pick_col(cols, "sku") or "SKU"
+        # "Расход (Оплата за заказ), ₽"
+        col_order = _pick_col(cols, "расход", "заказ") or _pick_col(cols, "оплата", "заказ")
+
+        if col_sku not in cols or not col_order:
+            continue
+
+        for r in reader:
+            sku_raw = str(r.get(col_sku, "") or "").strip()
+            if not sku_raw:
+                continue
+            try:
+                sku = int(float(sku_raw))
+            except Exception:
+                continue
+
+            spend_order = _parse_ru_money(str(r.get(col_order, "") or "0"))
+            if spend_order == 0:
+                continue
+
+            out["by_sku"][sku] = float(out["by_sku"].get(sku, 0.0) + float(spend_order))
+            out["total"] += float(spend_order)
+
+    out["total"] = float(round(out["total"], 2))
+    return out
+
 def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd.DataFrame:
     """Распределяем рекламу по SKU-строкам, но так, чтобы сумма по одному артикулу сохранялась.
 
@@ -1811,8 +1869,13 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # расходы (в API обычно минусом)
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
-    # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
-    sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
+    
+    # Эквайринг — отдельно (берём из services, которые мы вынесли в ops_to_df)
+    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_service", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
+
+    sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
+    sku_df["services_cost"]   = (-sku_df["services_sum"]).clip(lower=0.0)
+
 
     # отдельно “Баллы за скидки” и “Программы партнёров”
     sku_df["bonus_cost"] = (-sku_df.get("bonus_points", 0)).clip(lower=0.0)
@@ -1831,20 +1894,14 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
             gross_sales=("accruals_for_sale", "sum"),
             amount_net=("amount", "sum"),
             commission=("commission_cost", "sum"),
+            acquiring=("acquiring_cost", "sum"),
             logistics=("services_cost", "sum"),
-            acquiring_amount=("acquiring_amount", "sum"),
+        acquiring_amount=("acquiring_amount_alloc", "sum"),
             bonus_points=("bonus_cost", "sum"),
             partner_programs=("partner_cost", "sum"),
         )
     )
 
-    
-
-    # Эквайринг (как в ЛК): NЕТТО по amount, затем переводим в расход (плюс)
-    if "acquiring_amount" in g.columns:
-        g["acquiring"] = (-pd.to_numeric(g["acquiring_amount"], errors="coerce").fillna(0.0)).clip(lower=0.0)
-    else:
-        g["acquiring"] = 0.0
     g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
 
     # ВАЖНО: “Выручка” как в ЛК = GrossSales - Баллы - Партнерки
@@ -2199,8 +2256,6 @@ with tab1:
                 st.dataframe(suspects, use_container_width=True)
 
     df_ops = ops_to_df(ops_now)
-    # Эквайринг: распределяем по SKU на полном df_ops (по posting_number)
-    df_ops = allocate_acquiring_cost_by_posting(df_ops)
     df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
 
     df_ops_prev = pd.DataFrame(columns=df_ops.columns)
@@ -2363,6 +2418,12 @@ with tab1:
         ads_spent_now = float(ads_now.get("spent", 0.0) or 0.0)
         sold_view = allocate_ads_by_article(sold_view, ads_alloc_now.get("by_article", {}))
 
+        # Реклама: "Оплата за заказ" (CPA) по SKU — отдельной колонкой
+        ppo = load_ads_payperorder_by_sku(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+        ppo_map = ppo.get("by_sku", {}) if isinstance(ppo, dict) else {}
+        sold_view["ads_order"] = pd.to_numeric(sold_view.get("sku", 0), errors="coerce").fillna(0).astype(int).map(ppo_map).fillna(0.0)
+
+
         # Опер. расходы распределяем пропорционально выручке SKU
         opex_period = opex_sum_period(df_opex, d_from, d_to)
         sold_view = allocate_cost_by_share(sold_view, opex_period, "opex_total")
@@ -2381,9 +2442,9 @@ with tab1:
             "accruals_net": "Выручка, ₽",
             "commission": "Комиссия, ₽",
             "logistics": "Услуги/логистика, ₽",
-            "acquiring": "Эквайринг, ₽",
             "sale_costs": "Расходы Ozon, ₽",
             "ads_total": "Реклама, ₽",
+            "ads_order": "Реклама (оплата за заказ), ₽",
             "cogs_unit": "Себестоимость 1 шт, ₽",
             "cogs_total": "Себестоимость всего, ₽",
             "tax_total": "Налог, ₽",
@@ -2417,7 +2478,7 @@ with tab1:
             "Артикул","SKU","Название",
             "Заказы, шт","Возвраты, шт","Выкуп, шт","% выкупа",
             "Выручка, ₽","Средняя цена продажи, ₽","ДРР, %",
-            "Комиссия, ₽","Услуги/логистика, ₽","Эквайринг, ₽","Расходы Ozon, ₽","Реклама, ₽",
+            "Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама (оплата за заказ), ₽","Реклама, ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
         ]
