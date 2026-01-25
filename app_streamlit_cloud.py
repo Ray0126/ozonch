@@ -1941,7 +1941,7 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
         g["acquiring"] = (-pd.to_numeric(g["acquiring_amount"], errors="coerce").fillna(0.0)).clip(lower=0.0)
     else:
         g["acquiring"] = 0.0
-g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
+    g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
 
     # ВАЖНО: “Выручка” как в ЛК = GrossSales - Баллы - Партнерки
     g["accruals_net"] = g["gross_sales"] - g["bonus_points"] - g["partner_programs"]
