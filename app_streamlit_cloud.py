@@ -1811,13 +1811,8 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # расходы (в API обычно минусом)
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
     sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
-    
-    # Эквайринг — отдельно (берём из services, которые мы вынесли в ops_to_df)
-    sku_df["acquiring_cost"] = (-pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
-
-    sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
-    sku_df["services_cost"]   = (-sku_df["services_sum"]).clip(lower=0.0)
-
+    # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
+    sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
 
     # отдельно “Баллы за скидки” и “Программы партнёров”
     sku_df["bonus_cost"] = (-sku_df.get("bonus_points", 0)).clip(lower=0.0)
@@ -1836,15 +1831,21 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
             gross_sales=("accruals_for_sale", "sum"),
             amount_net=("amount", "sum"),
             commission=("commission_cost", "sum"),
-            acquiring=("acquiring_cost", "sum"),
             logistics=("services_cost", "sum"),
-        acquiring_amount=("acquiring_amount_alloc", "sum"),
+            acquiring_amount=("acquiring_amount", "sum"),
             bonus_points=("bonus_cost", "sum"),
             partner_programs=("partner_cost", "sum"),
         )
     )
 
-    g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
+    
+
+    # Эквайринг (как в ЛК): NЕТТО по amount, затем переводим в расход (плюс)
+    if "acquiring_amount" in g.columns:
+        g["acquiring"] = (-pd.to_numeric(g["acquiring_amount"], errors="coerce").fillna(0.0)).clip(lower=0.0)
+    else:
+        g["acquiring"] = 0.0
+g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
 
     # ВАЖНО: “Выручка” как в ЛК = GrossSales - Баллы - Партнерки
     g["accruals_net"] = g["gross_sales"] - g["bonus_points"] - g["partner_programs"]
