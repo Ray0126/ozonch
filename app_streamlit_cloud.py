@@ -317,6 +317,102 @@ def _block_with_retry(title: str, details: str, cache_clear_fn=None):
     st.stop()
 
 
+
+
+
+# ================== ADS: PAY-PER-ORDER (Оплата за заказ) ==================
+@st.cache_data(show_spinner=False, ttl=60*60)
+def load_ads_payperorder_by_sku(date_from: str, date_to: str) -> dict[int, float]:
+    """Возвращает расходы 'Оплата за заказ' по SKU за период [date_from; date_to] включительно.
+    Источник: Performance API -> statistic/products report (CSV).
+    date_from/date_to: 'YYYY-MM-DD'
+    """
+    base_url = "https://api-performance.ozon.ru"
+    gen_path = "/api/client/statistic/products/generate"
+    rep_path = "/api/client/statistics/report"
+
+    headers = {
+        "Client-Id": OZON_PERF_CLIENT_ID,
+        "Api-Key": OZON_PERF_API_KEY,
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    # Ozon ожидает RFC3339 с Z
+    date_from_rfc = f"{date_from}T00:00:00.000Z"
+    date_to_rfc = f"{date_to}T23:59:59.000Z"
+
+    payload = {"dateFrom": date_from_rfc, "dateTo": date_to_rfc}
+
+    r = requests.post(base_url + gen_path, headers=headers, json=payload, timeout=60)
+    r.raise_for_status()
+    uuid = r.json().get("UUID") or r.json().get("uuid")
+    if not uuid:
+        return {}
+
+    # ждём готовность и качаем CSV
+    csv_text = None
+    for _ in range(30):
+        rr = requests.get(base_url + rep_path, headers=headers, params={"UUID": uuid}, timeout=60)
+        if rr.status_code == 200:
+            csv_text = rr.text
+            break
+        if rr.status_code in (404, 409, 425):
+            time.sleep(2)
+            continue
+        rr.raise_for_status()
+
+    if not csv_text:
+        return {}
+
+    # CSV с ; или , — попробуем оба
+    from io import StringIO
+    df = None
+    for sep in (";", ","):
+        try:
+            df_try = pd.read_csv(StringIO(csv_text), sep=sep)
+            if df_try.shape[1] > 1:
+                df = df_try
+                break
+        except Exception:
+            continue
+    if df is None or df.empty:
+        return {}
+
+    # колонка SKU бывает 'SKU'/'sku' и т.п.
+    sku_col = None
+    for c in df.columns:
+        if str(c).strip().lower() == "sku":
+            sku_col = c
+            break
+    if sku_col is None:
+        return {}
+
+    # ищем колонку расхода за заказ
+    spend_col = None
+    for c in df.columns:
+        cl = str(c).strip().lower()
+        if ("расход" in cl or "spend" in cl) and ("заказ" in cl or "order" in cl):
+            spend_col = c
+            break
+    if spend_col is None:
+        # fallback: иногда название включает 'оплата за заказ'
+        for c in df.columns:
+            cl = str(c).strip().lower()
+            if "оплата" in cl and "заказ" in cl:
+                spend_col = c
+                break
+    if spend_col is None:
+        return {}
+
+    df[sku_col] = pd.to_numeric(df[sku_col], errors="coerce").fillna(0).astype(int)
+    df[spend_col] = pd.to_numeric(df[spend_col], errors="coerce").fillna(0.0)
+
+    out = df.groupby(sku_col, as_index=True)[spend_col].sum().to_dict()
+    # groupby key may be numpy int; normalize
+    return {int(k): float(v) for k, v in out.items() if int(k) != 0}
+
+
 # ================== CONFIG ==================
 st.set_page_config(
     layout="wide",
@@ -1796,118 +1892,6 @@ def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd
 
 
 # ================== SOLD SKU TABLE ==================
-
-
-# ================== PERFORMANCE: PAY-PER-ORDER (по SKU) ==================
-@st.cache_data(ttl=6*60*60, show_spinner=False)
-def load_payperorder_spend_by_sku(date_from: str, date_to: str) -> dict[int, float]:
-    """Тянет из Performance API расходы по модели 'Оплата за заказ' в разрезе SKU за период.
-    Возвращает словарь {sku: spend_order_rub}.
-    date_from/date_to: 'YYYY-MM-DD'
-    """
-    perf_id = _get_setting("PERF_CLIENT_ID", "").strip()
-    perf_secret = _get_setting("PERF_CLIENT_SECRET", "").strip()
-    if not perf_id or not perf_secret:
-        return {}
-
-    BASE = "https://api-performance.ozon.ru/api/client"
-
-    def _get_token() -> str:
-        r = requests.post(
-            f"{BASE}/token",
-            json={
-                "client_id": int(perf_id) if perf_id.isdigit() else perf_id,
-                "client_secret": perf_secret,
-                "grant_type": "client_credentials",
-            },
-            timeout=30,
-        )
-        r.raise_for_status()
-        js = r.json() or {}
-        token = js.get("access_token")
-        if not token:
-            raise RuntimeError(f"Не получил access_token: {js}")
-        return token
-
-    def _headers(token: str) -> dict:
-        return {"Authorization": f"Bearer {token}", "Accept": "*/*"}
-
-    # RFC3339: берем локальную зону +03:00 (как в ЛК)
-    frm = f"{date_from}T00:00:00+03:00"
-    to  = f"{date_to}T23:59:59+03:00"
-
-    try:
-        token = _get_token()
-
-        r = requests.post(
-            f"{BASE}/statistic/products/generate",
-            headers=_headers(token),
-            json={"from": frm, "to": to},
-            timeout=60,
-        )
-        r.raise_for_status()
-        js = r.json() or {}
-        uuid = js.get("UUID") or js.get("uuid")
-        if not uuid:
-            return {}
-
-        # ждём отчёт и скачиваем CSV
-        content = None
-        for _ in range(60):
-            rr = requests.get(
-                f"{BASE}/statistics/report",
-                headers=_headers(token),
-                params={"UUID": uuid},
-                timeout=60,
-            )
-            if rr.status_code == 200:
-                content = rr.content
-                break
-            time.sleep(2)
-        if content is None:
-            return {}
-
-        raw = content.decode("utf-8", errors="ignore")
-
-        df = None
-        for sep in (";", ",", "\t"):
-            try:
-                tmp = pd.read_csv(io.StringIO(raw), sep=sep)
-                if tmp.shape[1] >= 3:
-                    df = tmp
-                    break
-            except Exception:
-                continue
-        if df is None or df.empty:
-            return {}
-
-        # SKU column
-        sku_col = None
-        for c in df.columns:
-            if "sku" in str(c).strip().lower():
-                sku_col = c
-                break
-        if sku_col is None:
-            return {}
-
-        # Spend by order column
-        spend_col = None
-        for c in df.columns:
-            cl = str(c).strip().lower()
-            if ("расход" in cl) and ("заказ" in cl):
-                spend_col = c
-                break
-        if spend_col is None:
-            return {}
-
-        df[sku_col] = pd.to_numeric(df[sku_col], errors="coerce").fillna(0).astype(int)
-        df[spend_col] = pd.to_numeric(df[spend_col], errors="coerce").fillna(0.0)
-
-        out = df.groupby(sku_col)[spend_col].sum().to_dict()
-        out.pop(0, None)
-        return {int(k): float(v) for k, v in out.items()}
-    except Exception:
-        return {}
 def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
     # Эквайринг: распределяем acquiring_amount по SKU на уровне posting_number (до фильтрации sku)
     df_ops = allocate_acquiring_amount_by_posting(df_ops)
@@ -1957,7 +1941,7 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
         g["acquiring"] = (-pd.to_numeric(g["acquiring_amount"], errors="coerce").fillna(0.0)).clip(lower=0.0)
     else:
         g["acquiring"] = 0.0
-    g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
+g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
 
     # ВАЖНО: “Выручка” как в ЛК = GrossSales - Баллы - Партнерки
     g["accruals_net"] = g["gross_sales"] - g["bonus_points"] - g["partner_programs"]
@@ -2475,10 +2459,6 @@ with tab1:
         ads_spent_now = float(ads_now.get("spent", 0.0) or 0.0)
         sold_view = allocate_ads_by_article(sold_view, ads_alloc_now.get("by_article", {}))
 
-        # Реклама (оплата за заказ) по SKU — отдельной колонкой
-        ppo_map = load_payperorder_spend_by_sku(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
-        sold_view["ads_order"] = pd.to_numeric(sold_view["sku"], errors="coerce").fillna(0).astype(int).map(ppo_map).fillna(0.0)
-
         # Опер. расходы распределяем пропорционально выручке SKU
         opex_period = opex_sum_period(df_opex, d_from, d_to)
         sold_view = allocate_cost_by_share(sold_view, opex_period, "opex_total")
@@ -2550,13 +2530,13 @@ with tab1:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0).astype(int)
 
         money_cols = [
-            "Выручка, ₽","Средняя цена продажи, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама (оплата за заказ), ₽","Реклама, ₽",
+            "Выручка, ₽","Средняя цена продажи, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽",
         ]
         for c in money_cols:
-            if c in show.columns:
-                show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
+        if c in show.columns:
+            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
         pct_cols = ["% выкупа","ДРР, %","Маржинальность, %","ROI, %"]
         for c in pct_cols:
