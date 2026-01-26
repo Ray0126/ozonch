@@ -354,6 +354,26 @@ def _get_setting(name: str, default: str = "") -> str:
         pass
     return default
 
+
+
+def _parse_ozon_csv_money(v) -> float:
+    """Парсит деньги из CSV Ozon (может быть '1 234,56', '1\xa0234,56', '0', NaN)."""
+    if v is None:
+        return 0.0
+    try:
+        if isinstance(v, (int, float)):
+            return float(v)
+        s = str(v)
+        if not s or s.lower() in ("nan", "none"):
+            return 0.0
+        # remove currency and spaces (including NBSP)
+        s = s.replace("₽", "").replace("\xa0", "").replace("\u00a0", "").replace(" ", "")
+        # decimal comma -> dot
+        s = s.replace(",", ".")
+        return float(s)
+    except Exception:
+        return 0.0
+
 # Локальная разработка/EXE: можно держать .env рядом, но в облаке его не будет.
 try:
     load_dotenv(resource_path(".env"), override=False)
@@ -1561,7 +1581,7 @@ def load_ads_payperorder_by_sku(date_from: str, date_to: str) -> dict[int, float
             return {}
 
         df[sku_col] = pd.to_numeric(df[sku_col], errors="coerce").fillna(0).astype(int)
-        df[spend_col] = pd.to_numeric(df[spend_col], errors="coerce").fillna(0.0)
+        df[spend_col] = df[spend_col].apply(_parse_ozon_csv_money)
 
         out = df.groupby(sku_col, as_index=True)[spend_col].sum().to_dict()
         return {int(k): float(v) for k, v in out.items() if int(k) != 0}
