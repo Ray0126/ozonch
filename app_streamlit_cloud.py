@@ -47,7 +47,7 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
         f"{BASE}/api/client/token",
         json={"client_id": perf_id, "client_secret": perf_secret, "grant_type": "client_credentials"},
         headers={"Content-Type": "application/json", "Accept": "application/json"},
-        timeout=60,
+        timeout=20,
     )
     if r.status_code != 200:
         # 401 = неверные ключи/не тот тип ключа
@@ -63,7 +63,7 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
         f"{BASE}/api/client/statistics/products/generate/json",
         json={"from": _rfc3339_day(date_from, end=False), "to": _rfc3339_day(date_to, end=True)},
         headers=headers,
-        timeout=60,
+        timeout=20,
     )
     if gen.status_code != 200:
         return {}
@@ -75,12 +75,12 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     report_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     rows = None
     last_status = None
-    for _ in range(90):  # ~180 сек при sleep 2
+    for _ in range(25):  # ~25 сек при sleep 1
         rep = requests.get(
             f"{BASE}/api/client/statistics/report/json",
             params={"UUID": str(uuid)},
             headers=report_headers,
-            timeout=60,
+            timeout=20,
         )
         if rep.status_code == 200:
             try:
@@ -91,7 +91,7 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
             break
         if rep.status_code in (404, 409, 425):
             last_status = rep.status_code
-            time.sleep(2)
+            time.sleep(1)
             continue
         # 400/401/5xx
         return {}
@@ -757,7 +757,7 @@ class OzonPerfClient:
                 "User-Agent": "ozon-ads-dashboard/1.0",
             },
             params=params,
-            timeout=60
+            timeout=20
         )
 
         meta = {
@@ -2481,10 +2481,13 @@ with tab1:
         sold_view = allocate_ads_by_article(sold_view, ads_alloc_now.get("by_article", {}))
 
         # spend_click из отчёта Performance (products json): MoneySpentFromCPC по SKU
-        try:
-            _perf_map = load_perf_spend_click_by_sku(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
-        except Exception:
-            _perf_map = {}
+        with st.spinner("Performance API: загружаю рекламу (расходы по SKU)…"):
+            try:
+                _perf_map = load_perf_spend_click_by_sku(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+            except Exception:
+                _perf_map = {}
+        if not _perf_map:
+            st.caption("Performance API: не удалось получить данные по рекламе — колонка будет 0.")
         sold_view["ads_spend_click"] = pd.to_numeric(sold_view["sku"], errors="coerce").fillna(0).astype(int).map(_perf_map).fillna(0.0)
 
 
