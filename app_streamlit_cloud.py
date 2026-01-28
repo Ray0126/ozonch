@@ -2550,27 +2550,40 @@ with tab1:
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
         ]
+        # 1) Убираем дубли в списке колонок (важно!)
         cols = list(dict.fromkeys(cols))
+        
+        # 2) Дозаполняем отсутствующие колонки нулями
         for c in cols:
             if c not in show.columns:
                 show[c] = 0.0
-        show = show[cols].copy()
         
+        # 3) Выбираем только нужные колонки и ещё раз убираем дубли (на всякий)
+        show = show[cols].copy()
         show = show.loc[:, ~show.columns.duplicated()].copy()
-show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
-        # Сортировка должна работать корректно => оставляем числовые типы
-        # Числа приводим, но НЕ форматируем в строки
-        int_cols = ["Заказы, шт","Возвраты, шт","Выкуп, шт"]
+        
+        # 4) SKU оставляем числом для сортировок/слияний, а строкой делаем только для отображения (если нужно)
+        if "SKU" in show.columns:
+            show["SKU_num"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int)
+            show["SKU"] = show["SKU_num"].astype(str)
+        
+        # 5) Числовые целые колонки
+        int_cols = ["Заказы, шт", "Возвраты, шт", "Выкуп, шт"]
         for c in int_cols:
-            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0).astype(int)
-
+            if c in show.columns:
+                show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0).astype(int)
+        
+        # 6) Денежные колонки (float)
         money_cols = [
-            "Выручка, ₽","Средняя цена продажи, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽","Реклама (клик), ₽",
-            "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
-            "Прибыль, ₽","Прибыль на 1 шт, ₽",
+            "Выручка, ₽", "Средняя цена продажи, ₽", "Комиссия, ₽", "Услуги/логистика, ₽",
+            "Расходы Ozon, ₽", "Реклама, ₽", "Реклама (клик), ₽",
+            "Себестоимость 1 шт, ₽", "Себестоимость всего, ₽",
+            "Налог, ₽", "Опер. расходы, ₽",
+            "Прибыль, ₽", "Прибыль на 1 шт, ₽",
         ]
         for c in money_cols:
-            show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
+            if c in show.columns:
+                show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0.0)
 
         pct_cols = ["% выкупа","ДРР, %","Маржинальность, %","ROI, %"]
         for c in pct_cols:
