@@ -6,6 +6,123 @@ import requests
 import streamlit as st
 import pandas as pd
 
+# ================== PERFORMANCE PRODUCTS REPORT (Spend Click by SKU) ==================
+def _rfc3339_day(s: str, end: bool = False) -> str:
+    s = str(s or "").strip()
+    if "T" in s:
+        return s
+    return f"{s}T23:59:59Z" if end else f"{s}T00:00:00Z"
+
+def _parse_ru_money(x) -> float:
+    """Парсит деньги из строк вида '1 234,56', '-', '—', None."""
+    if x is None:
+        return 0.0
+    s = str(x).strip()
+    if s in ("", "-", "—", "None", "nan", "NaN"):
+        return 0.0
+    s = s.replace("\ufeff", "").replace("\xa0", " ").replace("₽", "").strip()
+    s = s.replace(" ", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+@st.cache_data(ttl=60*30, show_spinner=False)
+def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
+    """Возвращает {sku:int -> spend_click(float)} из отчёта Performance /statistics/products (json).
+    spend_click = MoneySpentFromCPC (как в тестовом скрипте).
+    Берёт ключи из Secrets/.env: PERF_CLIENT_ID / PERF_CLIENT_SECRET (fallback: OZON_CLIENT_ID / OZON_CLIENT_SECRET).
+    """
+    perf_id = (st.secrets.get("PERF_CLIENT_ID", None) if hasattr(st, "secrets") else None) or os.getenv("PERF_CLIENT_ID") or os.getenv("OZON_PERF_CLIENT_ID") or os.getenv("OZON_CLIENT_ID")
+    perf_secret = (st.secrets.get("PERF_CLIENT_SECRET", None) if hasattr(st, "secrets") else None) or os.getenv("PERF_CLIENT_SECRET") or os.getenv("OZON_PERF_CLIENT_SECRET") or os.getenv("OZON_CLIENT_SECRET")
+    perf_id = str(perf_id or "").strip()
+    perf_secret = str(perf_secret or "").strip()
+    if not perf_id or not perf_secret:
+        return {}
+
+    BASE = "https://api-performance.ozon.ru"
+
+    # 1) token
+    r = requests.post(
+        f"{BASE}/api/client/token",
+        json={"client_id": perf_id, "client_secret": perf_secret, "grant_type": "client_credentials"},
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        timeout=60,
+    )
+    if r.status_code != 200:
+        # 401 = неверные ключи/не тот тип ключа
+        return {}
+    token = (r.json() or {}).get("access_token") or ""
+    if not token:
+        return {}
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"}
+
+    # 2) generate json report
+    gen = requests.post(
+        f"{BASE}/api/client/statistics/products/generate/json",
+        json={"from": _rfc3339_day(date_from, end=False), "to": _rfc3339_day(date_to, end=True)},
+        headers=headers,
+        timeout=60,
+    )
+    if gen.status_code != 200:
+        return {}
+    uuid = (gen.json() or {}).get("UUID") or (gen.json() or {}).get("uuid")
+    if not uuid:
+        return {}
+
+    # 3) poll report json
+    report_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    rows = None
+    last_status = None
+    for _ in range(90):  # ~180 сек при sleep 2
+        rep = requests.get(
+            f"{BASE}/api/client/statistics/report/json",
+            params={"UUID": str(uuid)},
+            headers=report_headers,
+            timeout=60,
+        )
+        if rep.status_code == 200:
+            try:
+                data = rep.json()
+            except Exception:
+                return {}
+            rows = (data.get("rows") or [])
+            break
+        if rep.status_code in (404, 409, 425):
+            last_status = rep.status_code
+            time.sleep(2)
+            continue
+        # 400/401/5xx
+        return {}
+    if not rows:
+        return {}
+
+    df = pd.DataFrame(rows)
+    if df.empty or "SKU" not in df.columns:
+        return {}
+
+    df["SKU"] = pd.to_numeric(df["SKU"], errors="coerce")
+    df = df.dropna(subset=["SKU"]).copy()
+    if df.empty:
+        return {}
+    df["SKU"] = df["SKU"].astype(int)
+
+    if "MoneySpentFromCPC" in df.columns:
+        df["MoneySpentFromCPC"] = df["MoneySpentFromCPC"].apply(_parse_ru_money)
+        df["spend_click"] = df["MoneySpentFromCPC"]
+    elif "moneySpentFromCPC" in df.columns:
+        df["moneySpentFromCPC"] = df["moneySpentFromCPC"].apply(_parse_ru_money)
+        df["spend_click"] = df["moneySpentFromCPC"]
+    else:
+        # если вдруг поле переименовали — не падаем
+        df["spend_click"] = 0.0
+
+    agg = df.groupby("SKU", as_index=True)["spend_click"].sum()
+    out = {int(k): float(v) for k, v in agg.to_dict().items()}
+    return out
+
+
 
 
 
@@ -2363,6 +2480,14 @@ with tab1:
         ads_spent_now = float(ads_now.get("spent", 0.0) or 0.0)
         sold_view = allocate_ads_by_article(sold_view, ads_alloc_now.get("by_article", {}))
 
+        # spend_click из отчёта Performance (products json): MoneySpentFromCPC по SKU
+        try:
+            _perf_map = load_perf_spend_click_by_sku(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+        except Exception:
+            _perf_map = {}
+        sold_view["ads_spend_click"] = pd.to_numeric(sold_view["sku"], errors="coerce").fillna(0).astype(int).map(_perf_map).fillna(0.0)
+
+
         # Опер. расходы распределяем пропорционально выручке SKU
         opex_period = opex_sum_period(df_opex, d_from, d_to)
         sold_view = allocate_cost_by_share(sold_view, opex_period, "opex_total")
@@ -2384,6 +2509,7 @@ with tab1:
             "acquiring": "Эквайринг, ₽",
             "sale_costs": "Расходы Ozon, ₽",
             "ads_total": "Реклама, ₽",
+            "ads_spend_click": "Реклама (клик), ₽",
             "cogs_unit": "Себестоимость 1 шт, ₽",
             "cogs_total": "Себестоимость всего, ₽",
             "tax_total": "Налог, ₽",
@@ -2417,7 +2543,7 @@ with tab1:
             "Артикул","SKU","Название",
             "Заказы, шт","Возвраты, шт","Выкуп, шт","% выкупа",
             "Выручка, ₽","Средняя цена продажи, ₽","ДРР, %",
-            "Комиссия, ₽","Услуги/логистика, ₽","Эквайринг, ₽","Расходы Ozon, ₽","Реклама, ₽",
+            "Комиссия, ₽","Услуги/логистика, ₽","Эквайринг, ₽","Расходы Ozon, ₽","Реклама, ₽","Реклама (клик), ₽","Реклама (клик), ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
         ]
@@ -2433,7 +2559,7 @@ with tab1:
             show[c] = pd.to_numeric(show[c], errors="coerce").fillna(0).astype(int)
 
         money_cols = [
-            "Выручка, ₽","Средняя цена продажи, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽",
+            "Выручка, ₽","Средняя цена продажи, ₽","Комиссия, ₽","Услуги/логистика, ₽","Расходы Ozon, ₽","Реклама, ₽","Реклама (клик), ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽",
         ]
