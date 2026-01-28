@@ -46,34 +46,34 @@ def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
 
     # Если нет posting_number — только прямые строки с SKU
     if "posting_number" not in df.columns:
-        direct = mask_acq & df[sku_col].notna()
+        direct = mask_acq & df["sku"].notna()
         if direct.any():
             tmp = df.loc[direct, ["sku"]].copy()
             tmp["amount"] = amount[direct].values
             net = tmp.groupby("sku")["amount"].sum()
             # добавим на первую строку каждого SKU
             for sku, amt_sum in net.items():
-                idx = df.index[df[sku_col] == sku]
+                idx = df.index[df["sku"] == sku]
                 if len(idx) > 0:
                     df.loc[idx[0], "acquiring_cost"] += float(max(-amt_sum, 0.0))
         return df
 
     # 1) прямые строки с SKU: NET по (posting_number, sku)
-    direct = mask_acq & df[sku_col].notna() & df["posting_number"].astype(str).ne("")
+    direct = mask_acq & df["sku"].notna() & df["posting_number"].astype(str).ne("")
     if direct.any():
         tmp = df.loc[direct, ["posting_number", "sku"]].copy()
         tmp["amount"] = amount[direct].values
         net = tmp.groupby(["posting_number", "sku"], as_index=False)["amount"].sum()
         net["acq_cost"] = net["amount"].apply(lambda x: float(max(-x, 0.0)))
 
-        key = df.loc[df[sku_col].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
+        key = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
         key["idx"] = key.index.values
         net2 = net.merge(key, on=["posting_number", "sku"], how="left").dropna(subset=["idx"])
         if not net2.empty:
             df.loc[net2["idx"].astype(int).values, "acquiring_cost"] += net2["acq_cost"].astype(float).values
 
     # 2) строки без SKU: NET по posting_number и распределение
-    und = mask_acq & df[sku_col].isna() & df["posting_number"].astype(str).ne("")
+    und = mask_acq & df["sku"].isna() & df["posting_number"].astype(str).ne("")
     if not und.any():
         return df
 
@@ -85,7 +85,7 @@ def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
     if acq_sum.empty:
         return df
 
-    base = df.loc[df[sku_col].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
+    base = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
     if base.empty:
         return df
 
@@ -104,7 +104,7 @@ def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
         return df
     alloc["acq_alloc"] = alloc["acq_cost"] * alloc["share"]
 
-    key = df.loc[df[sku_col].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
+    key = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
     key["idx"] = key.index.values
     alloc2 = alloc.merge(key, on=["posting_number", "sku"], how="left").dropna(subset=["idx"])
     if alloc2.empty:
@@ -142,25 +142,25 @@ def allocate_acquiring_amount_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
         amt = pd.to_numeric(df.get("amount", 0), errors="coerce").fillna(0.0)
 
     # 1) прямые строки с SKU
-    direct = mask_acq & df[sku_col].notna()
+    direct = mask_acq & df["sku"].notna()
     df.loc[direct, "acquiring_amount_alloc"] += amt[direct].astype(float)
 
     # 2) строки без SKU — распределяем внутри posting_number
     if "posting_number" not in df.columns:
         return df
 
-    und = mask_acq & df[sku_col].isna() & df["posting_number"].astype(str).ne("")
+    und = mask_acq & df["sku"].isna() & df["posting_number"].astype(str).ne("")
     if not und.any():
         return df
 
-    base = df.loc[df[sku_col].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
+    base = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
     if base.empty:
         return df
 
     # веса: accruals_for_sale (если есть), иначе 1
     if "accruals_for_sale" in df.columns:
         w = pd.to_numeric(
-            df.loc[df[sku_col].notna() & df["posting_number"].astype(str).ne(""), "accruals_for_sale"],
+            df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), "accruals_for_sale"],
             errors="coerce"
         ).fillna(0.0).abs()
         base["w"] = w.values
@@ -180,7 +180,7 @@ def allocate_acquiring_amount_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
         return df
     alloc["acq_alloc"] = alloc["acq_amt"] * alloc["share"]
 
-    key = df.loc[df[sku_col].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
+    key = df.loc[df["sku"].notna() & df["posting_number"].astype(str).ne(""), ["posting_number", "sku"]].copy()
     key["idx"] = key.index.values
     alloc2 = alloc.merge(key, on=["posting_number", "sku"], how="left").dropna(subset=["idx"])
     if alloc2.empty:
@@ -1376,11 +1376,11 @@ def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
 
     df = df_ops.copy()
 
-    need = df[sku_col].isna() & df["posting_number"].astype(str).str.strip().ne("")
+    need = df["sku"].isna() & df["posting_number"].astype(str).str.strip().ne("")
     if not need.any():
         return df
 
-    has = df[sku_col].notna() & df["posting_number"].astype(str).str.strip().ne("")
+    has = df["sku"].notna() & df["posting_number"].astype(str).str.strip().ne("")
     if not has.any():
         return df
 
@@ -1591,7 +1591,7 @@ def load_ads_payperorder_by_sku(date_from: str, date_to: str) -> dict[int, float
         if spend_col is None:
             return {}
 
-        df[sku_col] = pd.to_numeric(df[sku_col], errors="coerce").fillna(0).astype(int)
+        df["sku"] = pd.to_numeric(df["sku"], errors="coerce").fillna(0).astype(int)
         df[spend_col] = df[spend_col].apply(_parse_ozon_csv_money)
 
         out = df.groupby(sku_col, as_index=True)[spend_col].sum().to_dict()
@@ -1947,9 +1947,9 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     if sku_df.empty:
         return pd.DataFrame()
 
-    sku_df[sku_col] = pd.to_numeric(sku_df[sku_col], errors="coerce").astype("Int64")
+    sku_df["sku"] = pd.to_numeric(sku_df["sku"], errors="coerce").astype("Int64")
     sku_df = sku_df.dropna(subset=["sku"]).copy()
-    sku_df[sku_col] = sku_df[sku_col].astype(int)
+    sku_df["sku"] = sku_df["sku"].astype(int)
 
     # расходы (в API обычно минусом)
     sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
@@ -3526,7 +3526,7 @@ with tab3:
         if col in export_df.columns:
             export_df[col] = pd.to_numeric(export_df[col], errors="coerce")
     if "SKU" in export_df.columns:
-        export_df[sku_col] = pd.to_numeric(export_df[sku_col], errors="coerce").astype("Int64")
+        export_df["sku"] = pd.to_numeric(export_df["sku"], errors="coerce").astype("Int64")
 
     # отображение (оставляем числа для корректной сортировки)
     # кол-во: int, деньги: float
