@@ -1591,7 +1591,7 @@ def load_ads_payperorder_by_sku(date_from: str, date_to: str) -> dict[int, float
         if spend_col is None:
             return {}
 
-        df["sku"] = pd.to_numeric(df["sku"], errors="coerce").fillna(0).astype(int)
+        df[sku_col] = pd.to_numeric(df[sku_col], errors="coerce").fillna(0).astype(int)
         df[spend_col] = df[spend_col].apply(_parse_ozon_csv_money)
 
         out = df.groupby(sku_col, as_index=True)[spend_col].sum().to_dict()
@@ -3526,7 +3526,8 @@ with tab3:
         if col in export_df.columns:
             export_df[col] = pd.to_numeric(export_df[col], errors="coerce")
     if "SKU" in export_df.columns:
-        export_df["sku"] = pd.to_numeric(export_df["sku"], errors="coerce").astype("Int64")
+        export_df["SKU"] = pd.to_numeric(export_df["SKU"], errors="coerce").astype("Int64")
+        export_df["sku"] = export_df["SKU"]
 
     # отображение (оставляем числа для корректной сортировки)
     # кол-во: int, деньги: float
