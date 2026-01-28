@@ -2550,11 +2550,14 @@ with tab1:
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
         ]
+        cols = list(dict.fromkeys(cols))
         for c in cols:
             if c not in show.columns:
                 show[c] = 0.0
         show = show[cols].copy()
-        show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
+        
+        show = show.loc[:, ~show.columns.duplicated()].copy()
+show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
         # Сортировка должна работать корректно => оставляем числовые типы
         # Числа приводим, но НЕ форматируем в строки
         int_cols = ["Заказы, шт","Возвраты, шт","Выкуп, шт"]
