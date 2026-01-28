@@ -9,16 +9,6 @@ import pandas as pd
 
 
 
-
-def _to_rfc3339_ozon(date_str: str, is_end: bool = False) -> str:
-    """YYYY-MM-DD -> RFC3339 UTC for Ozon products report."""
-    if date_str is None:
-        return ""
-    s = str(date_str).strip()
-    if "T" in s:
-        return s
-    return f"{s}T23:59:59.000Z" if is_end else f"{s}T00:00:00.000Z"
-
 def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
     """Эквайринг по SKU за период (как в ЛК).
     Ищем finance-операции с operation_type_name/type_name = 'Оплата эквайринга' (или содержит 'эквайринг').
@@ -657,7 +647,7 @@ class OzonPerfClient:
         headers = {"Authorization": f"Bearer {token}"}
 
         # params: если ids пустые — пробуем без campaignIds (у тебя так реально работало)
-        params: dict = {"dateFrom": _to_rfc3339_ozon(date_from_str, is_end=False), "dateTo": _to_rfc3339_ozon(date_to_str, is_end=True)}
+        params: dict = {"dateFrom": date_from_str, "dateTo": date_to_str}
 
         ids = [int(x) for x in (campaign_ids or []) if str(x).isdigit()]
         if ids:
@@ -787,8 +777,8 @@ class OzonPerfClient:
                 "campaign_ids_sample": ids[:50],
                 "chunks": chunks_info,
                 "errors": errors,
-                "dateFrom": _to_rfc3339_ozon(date_from_str, is_end=False),
-                "dateTo": _to_rfc3339_ozon(date_to_str, is_end=True),
+                "dateFrom": date_from_str,
+                "dateTo": date_to_str,
             }
             self._last_debug = dbg
 
@@ -1031,7 +1021,6 @@ def load_cogs() -> pd.DataFrame:
     if os.path.exists(COGS_PATH):
         try:
             df = pd.read_csv(COGS_PATH, encoding="utf-8-sig")
-
             df.columns = [str(c).strip() for c in df.columns]
             if "sku" not in df.columns or "cogs" not in df.columns:
                 df = normalize_cogs_upload(df)
@@ -1778,7 +1767,7 @@ def load_ads_spend_by_article(date_from_str: str, date_to_str: str) -> dict:
         r = requests.get(
             f"{BASE}/statistics/daily",
             headers=_headers(token),
-            params={"dateFrom": _to_rfc3339_ozon(date_from_str, is_end=False), "dateTo": _to_rfc3339_ozon(date_to_str, is_end=True)},
+            params={"dateFrom": date_from_str, "dateTo": date_to_str},
             timeout=DAILY_TIMEOUT_SEC,
         )
         if r.status_code >= 300:
@@ -3527,7 +3516,6 @@ with tab3:
             export_df[col] = pd.to_numeric(export_df[col], errors="coerce")
     if "SKU" in export_df.columns:
         export_df["SKU"] = pd.to_numeric(export_df["SKU"], errors="coerce").astype("Int64")
-        export_df["sku"] = export_df["SKU"]
 
     # отображение (оставляем числа для корректной сортировки)
     # кол-во: int, деньги: float
