@@ -1360,41 +1360,32 @@ def load_opex() -> pd.DataFrame:
         try:
             df = pd.read_csv(OPEX_PATH, encoding="utf-8-sig")
             df.columns = [str(c).strip().lower() for c in df.columns]
-    
             # ожидаем: date, type, amount
             if "date" not in df.columns:
+                # поддержка русских названий
                 if "дата" in df.columns:
                     df = df.rename(columns={"дата": "date"})
-    
             if "type" not in df.columns:
                 for c in df.columns:
                     if "тип" in c or "category" in c:
                         df = df.rename(columns={c: "type"})
                         break
-    
             if "amount" not in df.columns:
                 for c in df.columns:
                     if "сумм" in c or "amount" in c:
                         df = df.rename(columns={c: "amount"})
                         break
-    
-            if not {"date", "type", "amount"}.issubset(set(df.columns)):
+            if not {"date","type","amount"}.issubset(set(df.columns)):
                 return _opex_empty()
-    
-            df = df[["date", "type", "amount"]].copy()
+            df = df[["date","type","amount"]].copy()
             df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
             df["type"] = df["type"].fillna("").astype(str)
             df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
-            df = (
-                df.dropna(subset=["date"])
-                  .sort_values(["date", "type"])
-                  .reset_index(drop=True)
-            )
+            df = df.dropna(subset=["date"]).sort_values(["date","type"]).reset_index(drop=True)
             return df
-    
         except Exception:
             return _opex_empty()
-    
+
     return _opex_empty()
 
 def save_opex(df: pd.DataFrame):
@@ -2239,19 +2230,36 @@ def compute_profitability(sku_table: pd.DataFrame) -> pd.DataFrame:
         if c not in out.columns:
             out[c] = 0.0
 
-    # прибыль по новой формуле:
-    # Выручка − Расходы Ozon − Реклама − Себестоимость − Налог − Опер. расходы
+    
+    # прибыль:
+    # 1) Прибыль (до налога и опер. расходов) = Выручка − Расходы Ozon − Реклама (клик) − Реклама (заказ) − Себестоимость всего
+    ads_click = pd.to_numeric(out.get("ads_total", 0.0), errors="coerce").fillna(0.0)
+    ads_order = pd.to_numeric(out.get("ads_spend_click", 0.0), errors="coerce").fillna(0.0)
+
+    out["profit_before_tax_opex"] = (
+        pd.to_numeric(out.get("accruals_net", 0.0), errors="coerce").fillna(0.0)
+        - pd.to_numeric(out.get("sale_costs", 0.0), errors="coerce").fillna(0.0)
+        - ads_click
+        - ads_order
+        - pd.to_numeric(out.get("cogs_total", 0.0), errors="coerce").fillna(0.0)
+    )
+
+    out["profit_before_tax_opex_per_unit"] = out.apply(
+        lambda r: (float(r["profit_before_tax_opex"]) / float(r.get("qty_buyout", 0) or 0))
+        if float(r.get("qty_buyout", 0) or 0) > 0 else 0.0,
+        axis=1,
+    )
+
+    # 2) Прибыль (после налога и опер. расходов) — как было раньше, но учитываем и рекламу (заказ)
     out["profit"] = (
-        pd.to_numeric(out["accruals_net"], errors="coerce").fillna(0.0)
-        - pd.to_numeric(out["sale_costs"], errors="coerce").fillna(0.0)
-        - pd.to_numeric(out.get("ads_total", 0.0), errors="coerce").fillna(0.0)
-        - pd.to_numeric(out["cogs_total"], errors="coerce").fillna(0.0)
+        out["profit_before_tax_opex"]
         - pd.to_numeric(out.get("tax_total", 0.0), errors="coerce").fillna(0.0)
         - pd.to_numeric(out.get("opex_total", 0.0), errors="coerce").fillna(0.0)
     )
 
     out["profit_per_unit"] = out.apply(
-        lambda r: (float(r["profit"]) / float(r["qty_buyout"])) if float(r.get("qty_buyout", 0) or 0) > 0 else 0.0,
+        lambda r: (float(r["profit"]) / float(r.get("qty_buyout", 0) or 0))
+        if float(r.get("qty_buyout", 0) or 0) > 0 else 0.0,
         axis=1,
     )
 
@@ -2642,8 +2650,10 @@ with tab1:
             "cogs_total": "Себестоимость всего, ₽",
             "tax_total": "Налог, ₽",
             "opex_total": "Опер. расходы, ₽",
-            "profit": "Прибыль, ₽",
-            "profit_per_unit": "Прибыль на 1 шт, ₽",
+            "profit_before_tax_opex": "Прибыль, ₽",
+            "profit_before_tax_opex_per_unit": "Прибыль на 1 шт, ₽",
+            "profit": "Прибыль (после налога и OPEX), ₽",
+            "profit_per_unit": "Прибыль/шт (после), ₽",
             "margin_%": "Маржинальность, %",
             "roi_%": "ROI, %",
         })
