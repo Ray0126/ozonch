@@ -2488,7 +2488,18 @@ with tab1:
                 _perf_map = {}
         if not _perf_map:
             st.caption("Performance API: не удалось получить данные по рекламе — колонка будет 0.")
-        sold_view["ads_spend_click"] = pd.to_numeric(sold_view["sku"], errors="coerce").fillna(0).astype(int).map(_perf_map).fillna(0.0)
+        # Performance spend_click (CPC) по SKU — маппим максимально устойчиво (int/str)
+        _sku_ser = sold_view.get("sku")
+        if _sku_ser is None:
+            sold_view["ads_spend_click"] = 0.0
+        else:
+            _sku_str = (
+                _sku_ser.astype(str)
+                .str.replace(r"\.0$", "", regex=True)
+                .str.strip()
+            )
+            _perf_map_str = {str(k): float(v) for k, v in (_perf_map or {}).items()}
+            sold_view["ads_spend_click"] = _sku_str.map(_perf_map_str).fillna(0.0)
 
 
         # Опер. расходы распределяем пропорционально выручке SKU
