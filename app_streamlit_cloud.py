@@ -2523,7 +2523,27 @@ with tab1:
             "roi_%": "ROI, %",
         })
 
+        # ===== FINAL HARD FIX: SKU + spend_click =====
 
+        # нормализуем SKU (убираем запятые, пробелы, всё кроме цифр)
+        show["SKU"] = (
+            show["SKU"]
+            .astype(str)
+            .str.replace(r"[^\d]", "", regex=True)
+        )
+        
+        # гарантируем одинаковый формат ключей
+        spend_click_by_sku = {
+            str(int(k)): float(v)
+            for k, v in spend_click_by_sku.items()
+        }
+        
+        # маппинг рекламы за клик
+        show["Реклама (клик), ₽"] = (
+            show["SKU"]
+            .map(spend_click_by_sku)
+            .fillna(0.0)
+        )
         # === Доп. колонки для витрины (как на Ozon) ===
         show["% выкупа"] = show.apply(
             lambda r: (float(r.get("Выкуп, шт", 0)) / float(r.get("Заказы, шт", 0)) * 100.0)
