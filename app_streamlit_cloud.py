@@ -122,6 +122,104 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     out = {int(k): float(v) for k, v in agg.to_dict().items()}
     return out
 
+# --- DEBUG helper: raw Performance products report ---
+def _perf_products_report_debug(date_from: str, date_to: str) -> dict:
+    """DEBUG: возвращает мета-информацию по отчёту Performance products (json), чтобы понять почему 0.
+    Ничего не кэширует и не меняет расчёты.
+    """
+    info = {"ok": False, "stage": None, "status": None}
+    perf_id = (st.secrets.get("PERF_CLIENT_ID", None) if hasattr(st, "secrets") else None) or os.getenv("PERF_CLIENT_ID") or os.getenv("OZON_PERF_CLIENT_ID") or os.getenv("OZON_CLIENT_ID")
+    perf_secret = (st.secrets.get("PERF_CLIENT_SECRET", None) if hasattr(st, "secrets") else None) or os.getenv("PERF_CLIENT_SECRET") or os.getenv("OZON_PERF_CLIENT_SECRET") or os.getenv("OZON_CLIENT_SECRET")
+    perf_id = str(perf_id or "").strip()
+    perf_secret = str(perf_secret or "").strip()
+    info["has_keys"] = bool(perf_id and perf_secret)
+    if not perf_id or not perf_secret:
+        info["stage"] = "keys"
+        return info
+
+    BASE = "https://api-performance.ozon.ru"
+
+    # token
+    info["stage"] = "token"
+    r = requests.post(
+        f"{BASE}/api/client/token",
+        json={"client_id": perf_id, "client_secret": perf_secret, "grant_type": "client_credentials"},
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        timeout=60,
+    )
+    info["status"] = r.status_code
+    if r.status_code != 200:
+        info["error"] = (r.text or "")[:500]
+        return info
+    token = (r.json() or {}).get("access_token") or ""
+    info["token"] = bool(token)
+    if not token:
+        info["error"] = "no access_token"
+        return info
+
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"}
+
+    # generate
+    info["stage"] = "generate"
+    gen = requests.post(
+        f"{BASE}/api/client/statistics/products/generate/json",
+        json={"from": _rfc3339_day(date_from, end=False), "to": _rfc3339_day(date_to, end=True)},
+        headers=headers,
+        timeout=60,
+    )
+    info["generate_status"] = gen.status_code
+    if gen.status_code != 200:
+        info["error"] = (gen.text or "")[:500]
+        return info
+    uuid = (gen.json() or {}).get("UUID") or (gen.json() or {}).get("uuid")
+    info["uuid"] = uuid
+    if not uuid:
+        info["error"] = "no UUID in generate response"
+        info["gen_json_keys"] = list((gen.json() or {}).keys())
+        return info
+
+    # poll
+    info["stage"] = "poll"
+    report_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    last = None
+    for i in range(30):  # до ~60 сек
+        rep = requests.get(
+            f"{BASE}/api/client/statistics/report/json",
+            params={"UUID": str(uuid)},
+            headers=report_headers,
+            timeout=60,
+        )
+        last = rep.status_code
+        if rep.status_code == 200:
+            try:
+                data = rep.json()
+            except Exception:
+                info["error"] = f"report not json, head={(rep.text or '')[:200]!r}"
+                return info
+            rows = data.get("rows") or []
+            info["rows"] = len(rows)
+            if rows:
+                info["row_keys"] = list(rows[0].keys())[:40]
+                # посчитаем суммы по полям, если есть
+                df = pd.DataFrame(rows)
+                if "MoneySpentFromCPC" in df.columns:
+                    info["sum_MoneySpentFromCPC"] = float(df["MoneySpentFromCPC"].apply(_parse_ru_money).sum())
+                if "MoneySpent" in df.columns:
+                    info["sum_MoneySpent"] = float(df["MoneySpent"].apply(_parse_ru_money).sum())
+            info["ok"] = True
+            info["stage"] = "done"
+            return info
+        if rep.status_code in (404, 409, 425):
+            time.sleep(2)
+            continue
+        info["error"] = (rep.text or "")[:500]
+        info["report_status"] = rep.status_code
+        return info
+
+    info["report_status"] = last
+    info["error"] = "report timeout"
+    return info
+
 def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
     """Эквайринг по SKU за период (как в ЛК).
     Ищем finance-операции с operation_type_name/type_name = 'Оплата эквайринга' (или содержит 'эквайринг').
@@ -2414,6 +2512,37 @@ with tab1:
             .fillna(0.0)
         )
 
+
+        # --- DEBUG: почему реклама (клик) = 0 ---
+        with st.expander("DEBUG: Performance (Реклама клик) — диагностика", expanded=False):
+            st.write("perf_map size:", len(_perf_map))
+            if _perf_map:
+                st.write("perf_map total spend_click:", float(sum(_perf_map.values())))
+                # топ-10 по spend_click
+                top_items = sorted(_perf_map.items(), key=lambda x: x[1], reverse=True)[:10]
+                st.write("TOP-10 spend_click:", top_items)
+            else:
+                st.warning("perf_map пустой — либо отчёт не вернулся, либо ключи/период/эндпоинт не подходят.")
+
+            # проверим совпадение SKU из sold_view с ключами perf_map
+            try:
+                sample = sold_view[["article", "sku"]].head(20).copy() if "article" in sold_view.columns else sold_view[["sku"]].head(20).copy()
+                sample["sku_clean_int"] = (
+                    pd.to_numeric(sample["sku"].astype(str).str.replace(r"[^\d]", "", regex=True), errors="coerce")
+                    .fillna(0).astype(int)
+                )
+                sample["in_perf_map"] = sample["sku_clean_int"].apply(lambda x: int(x) in _perf_map)
+                st.dataframe(sample, use_container_width=True)
+            except Exception as e:
+                st.write("sample check failed:", e)
+
+            # глубокая проверка отчёта (делает отдельные запросы)
+            if st.button("DEBUG: запросить мета отчёта Performance", key="perf_dbg_btn"):
+                try:
+                    info = _perf_products_report_debug(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+                    st.json(info)
+                except Exception as e:
+                    st.error(f"perf debug failed: {e}")
 
         # Опер. расходы распределяем пропорционально выручке SKU
         opex_period = opex_sum_period(df_opex, d_from, d_to)
