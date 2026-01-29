@@ -2523,22 +2523,26 @@ with tab1:
             "roi_%": "ROI, %",
         })
 
-        # ===== FINAL HARD FIX: SKU + spend_click =====
-
-        # нормализуем SKU (убираем запятые, пробелы, всё кроме цифр)
+        # ===== FINAL FIX: Реклама (клик) =====
+        
+        # 1) нормализуем SKU в таблице (убираем запятые, пробелы и т.п.)
         show["SKU"] = (
             show["SKU"]
             .astype(str)
             .str.replace(r"[^\d]", "", regex=True)
         )
         
-        # гарантируем одинаковый формат ключей
+        # 2) если spend_click_by_sku ещё НЕ создан — создаём пустой
+        if "spend_click_by_sku" not in globals() or spend_click_by_sku is None:
+            spend_click_by_sku = {}
+        
+        # 3) нормализуем ключи spend_click_by_sku (на случай int / float)
         spend_click_by_sku = {
             str(int(k)): float(v)
             for k, v in spend_click_by_sku.items()
         }
         
-        # маппинг рекламы за клик
+        # 4) маппинг рекламы за клик
         show["Реклама (клик), ₽"] = (
             show["SKU"]
             .map(spend_click_by_sku)
