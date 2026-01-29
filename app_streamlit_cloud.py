@@ -5,22 +5,13 @@ import json
 import requests
 import streamlit as st
 import pandas as pd
-import datetime as dt
 
 # ================== PERFORMANCE PRODUCTS REPORT (Spend Click by SKU) ==================
 def _rfc3339_day(s: str, end: bool = False) -> str:
     s = str(s or "").strip()
     if "T" in s:
         return s
-    if not end:
-        return f"{s}T00:00:00Z"
-    # 'to' делаем эксклюзивной границей (как в ЛК отчётах): следующий день 00:00:00Z
-    try:
-        d = dt.datetime.strptime(s[:10], "%Y-%m-%d").date()
-        d2 = d + dt.timedelta(days=1)
-        return f"{d2.strftime('%Y-%m-%d')}T00:00:00Z"
-    except Exception:
-        return f"{s}T23:59:59Z"
+    return f"{s}T23:59:59Z" if end else f"{s}T00:00:00Z"
 
 def _parse_ru_money(x) -> float:
     """Парсит деньги из строк вида '1 234,56', '-', '—', None."""
@@ -46,9 +37,6 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     perf_secret = (st.secrets.get("PERF_CLIENT_SECRET", None) if hasattr(st, "secrets") else None) or os.getenv("PERF_CLIENT_SECRET") or os.getenv("OZON_PERF_CLIENT_SECRET") or os.getenv("OZON_CLIENT_SECRET")
     perf_id = str(perf_id or "").strip()
     perf_secret = str(perf_secret or "").strip()
-    # иногда в Streamlit secrets значения лежат с кавычками внутри
-    perf_id = perf_id.strip('"').strip("\'")
-    perf_secret = perf_secret.strip('"').strip("\'")
     if not perf_id or not perf_secret:
         return {}
 
@@ -57,7 +45,7 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     # 1) token
     r = requests.post(
         f"{BASE}/api/client/token",
-        json={"client_id": int(perf_id) if str(perf_id).isdigit() else perf_id, "client_secret": perf_secret, "grant_type": "client_credentials"},
+        json={"client_id": perf_id, "client_secret": perf_secret, "grant_type": "client_credentials"},
         headers={"Content-Type": "application/json", "Accept": "application/json"},
         timeout=20,
     )
@@ -2573,10 +2561,11 @@ with tab1:
         # 3) Выбираем только нужные колонки и ещё раз убираем дубли (на всякий)
         show = show[cols].copy()
         show = show.loc[:, ~show.columns.duplicated()].copy()
-        # SKU оставляем как есть (без вспомогательной колонки SKU_num)
+
+        # 4) SKU держим числом (int) — без вспомогательных SKU
         if "SKU" in show.columns:
-            show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int).astype(str)
-        
+            show["SKU"] = pd.to_numeric(show["SKU"], errors="coerce").fillna(0).astype(int)
+
         # 5) Числовые целые колонки
         int_cols = ["Заказы, шт", "Возвраты, шт", "Выкуп, шт"]
         for c in int_cols:
