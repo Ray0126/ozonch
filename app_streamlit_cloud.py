@@ -47,7 +47,7 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
         f"{BASE}/api/client/token",
         json={"client_id": perf_id, "client_secret": perf_secret, "grant_type": "client_credentials"},
         headers={"Content-Type": "application/json", "Accept": "application/json"},
-        timeout=20,
+        timeout=60,
     )
     if r.status_code != 200:
         # 401 = неверные ключи/не тот тип ключа
@@ -63,7 +63,7 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
         f"{BASE}/api/client/statistics/products/generate/json",
         json={"from": _rfc3339_day(date_from, end=False), "to": _rfc3339_day(date_to, end=True)},
         headers=headers,
-        timeout=20,
+        timeout=60,
     )
     if gen.status_code != 200:
         return {}
@@ -75,12 +75,12 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     report_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     rows = None
     last_status = None
-    for _ in range(25):  # ~25 сек при sleep 1
+    for _ in range(90):  # ~180 сек при sleep 2
         rep = requests.get(
             f"{BASE}/api/client/statistics/report/json",
             params={"UUID": str(uuid)},
             headers=report_headers,
-            timeout=20,
+            timeout=60,
         )
         if rep.status_code == 200:
             try:
@@ -91,7 +91,7 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
             break
         if rep.status_code in (404, 409, 425):
             last_status = rep.status_code
-            time.sleep(1)
+            time.sleep(2)
             continue
         # 400/401/5xx
         return {}
