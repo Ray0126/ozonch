@@ -2497,6 +2497,15 @@ with tab1:
 
         # прибыльные метрики по новым формулам
         sold_view = compute_profitability(sold_view)
+        
+        # ===== PERF spend_click по SKU за период Tab1 (гарантированно тут, перед таблицей) =====
+        try:
+            perf_map = load_perf_spend_click_by_sku(date_from.strftime("%Y-%m-%d"), date_to.strftime("%Y-%m-%d"))
+        except Exception:
+            perf_map = {}
+        
+        # нормализуем ключи как строки цифр
+        spend_click_by_sku = {str(int(k)): float(v) for k, v in (perf_map or {}).items()}
 
         show = sold_view.copy()
         show = show.rename(columns={
@@ -2526,11 +2535,7 @@ with tab1:
         # ===== FINAL FIX: Реклама (клик) =====
         
         # 1) нормализуем SKU в таблице (убираем запятые, пробелы и т.п.)
-        show["SKU"] = (
-            show["SKU"]
-            .astype(str)
-            .str.replace(r"[^\d]", "", regex=True)
-        )
+        show["SKU"] = show["SKU"].astype(str).str.replace(r"[^\d]", "", regex=True)
         
         # 2) если spend_click_by_sku ещё НЕ создан — создаём пустой
         if "spend_click_by_sku" not in globals() or spend_click_by_sku is None:
@@ -2543,11 +2548,8 @@ with tab1:
         }
         
         # 4) маппинг рекламы за клик
-        show["Реклама (клик), ₽"] = (
-            show["SKU"]
-            .map(spend_click_by_sku)
-            .fillna(0.0)
-        )
+        show["Реклама (клик), ₽"] = show["SKU"].map(spend_click_by_sku).fillna(0.0)
+
         # === Доп. колонки для витрины (как на Ozon) ===
         show["% выкупа"] = show.apply(
             lambda r: (float(r.get("Выкуп, шт", 0)) / float(r.get("Заказы, шт", 0)) * 100.0)
