@@ -2233,8 +2233,17 @@ def compute_profitability(sku_table: pd.DataFrame) -> pd.DataFrame:
     
     # прибыль:
     # 1) Прибыль (до налога и опер. расходов) = Выручка − Расходы Ozon − Реклама (клик) − Реклама (заказ) − Себестоимость всего
-    ads_click = pd.to_numeric(out.get("ads_total", 0.0), errors="coerce").fillna(0.0)
-    ads_order = pd.to_numeric(out.get("ads_spend_click", 0.0), errors="coerce").fillna(0.0)
+    # helper: безопасно получить числовую колонку (если колонки нет — вернём нули по индексам)
+    def _col_num(df: pd.DataFrame, col: str) -> pd.Series:
+        if col in df.columns:
+            return pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        return pd.Series(0.0, index=df.index)
+
+    # ВАЖНО: в твоём интерфейсе сейчас:
+    # - "Реклама (клик), ₽" берётся из out["ads_total"]
+    # - "Реклама (заказ), ₽" берётся из out["ads_spend_click"]
+    ads_click = _col_num(out, "ads_total")
+    ads_order = _col_num(out, "ads_spend_click")
 
     out["profit_before_tax_opex"] = (
         pd.to_numeric(out.get("accruals_net", 0.0), errors="coerce").fillna(0.0)
