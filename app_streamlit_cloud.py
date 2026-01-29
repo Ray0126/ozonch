@@ -71,17 +71,21 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     if not uuid:
         return {}
 
-    # 3) poll report json
+    # 3) poll report json (ждём, пока отчёт реально станет доступен)
     report_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
     rows = None
-    last_status = None
-    for _ in range(90):  # ~180 сек при sleep 2
+    wait_seconds = 0
+    max_wait_seconds = 10 * 60  # 10 минут
+
+    while wait_seconds < max_wait_seconds:
         rep = requests.get(
             f"{BASE}/api/client/statistics/report/json",
-            params={"UUID": str(uuid)},
+            params={"UUID": str(uuid), "uuid": str(uuid)},  # иногда API ожидает разный регистр
             headers=report_headers,
             timeout=60,
         )
+
         if rep.status_code == 200:
             try:
                 data = rep.json()
@@ -89,12 +93,16 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
                 return {}
             rows = (data.get("rows") or [])
             break
+
+        # 404/409/425 = отчёт ещё готовится (это нормально)
         if rep.status_code in (404, 409, 425):
-            last_status = rep.status_code
-            time.sleep(2)
+            time.sleep(3)
+            wait_seconds += 3
             continue
-        # 400/401/5xx
+
+        # 400/401/5xx — реальные ошибки
         return {}
+
     if not rows:
         return {}
 
@@ -181,15 +189,20 @@ def _perf_products_report_debug(date_from: str, date_to: str) -> dict:
     # poll
     info["stage"] = "poll"
     report_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+
+    wait_seconds = 0
+    max_wait_seconds = 10 * 60  # 10 минут
     last = None
-    for i in range(30):  # до ~60 сек
+
+    while wait_seconds < max_wait_seconds:
         rep = requests.get(
             f"{BASE}/api/client/statistics/report/json",
-            params={"UUID": str(uuid)},
+            params={"UUID": str(uuid), "uuid": str(uuid)},
             headers=report_headers,
             timeout=60,
         )
         last = rep.status_code
+
         if rep.status_code == 200:
             try:
                 data = rep.json()
@@ -200,7 +213,6 @@ def _perf_products_report_debug(date_from: str, date_to: str) -> dict:
             info["rows"] = len(rows)
             if rows:
                 info["row_keys"] = list(rows[0].keys())[:40]
-                # посчитаем суммы по полям, если есть
                 df = pd.DataFrame(rows)
                 if "MoneySpentFromCPC" in df.columns:
                     info["sum_MoneySpentFromCPC"] = float(df["MoneySpentFromCPC"].apply(_parse_ru_money).sum())
@@ -209,9 +221,13 @@ def _perf_products_report_debug(date_from: str, date_to: str) -> dict:
             info["ok"] = True
             info["stage"] = "done"
             return info
+
+        # 404/409/425 = отчёт ещё готовится
         if rep.status_code in (404, 409, 425):
-            time.sleep(2)
+            time.sleep(3)
+            wait_seconds += 3
             continue
+
         info["error"] = (rep.text or "")[:500]
         info["report_status"] = rep.status_code
         return info
