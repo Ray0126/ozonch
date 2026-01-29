@@ -29,29 +29,39 @@ def _parse_ru_money(x) -> float:
 
 @st.cache_data(ttl=60*30, show_spinner=False)
 def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
-    """Возвращает {sku:int -> spend_click(float)} из отчёта Performance /statistics/products (json).
-    spend_click = MoneySpentFromCPC (как в тестовом скрипте).
-    Берёт ключи из Secrets/.env: PERF_CLIENT_ID / PERF_CLIENT_SECRET (fallback: OZON_CLIENT_ID / OZON_CLIENT_SECRET).
+    """Возвращает {sku:int -> spend_click(float)} из отчёта Performance products (JSON).
+
+    Поле spend_click берём напрямую из отчёта: MoneySpentFromCPC.
+    Ключи берём из Secrets/.env:
+      - PERF_CLIENT_ID / PERF_CLIENT_SECRET
+      - fallback: OZON_PERF_CLIENT_ID / OZON_PERF_CLIENT_SECRET
+      - fallback: OZON_CLIENT_ID / OZON_CLIENT_SECRET
     """
     perf_id = (st.secrets.get("PERF_CLIENT_ID", None) if hasattr(st, "secrets") else None) or os.getenv("PERF_CLIENT_ID") or os.getenv("OZON_PERF_CLIENT_ID") or os.getenv("OZON_CLIENT_ID")
     perf_secret = (st.secrets.get("PERF_CLIENT_SECRET", None) if hasattr(st, "secrets") else None) or os.getenv("PERF_CLIENT_SECRET") or os.getenv("OZON_PERF_CLIENT_SECRET") or os.getenv("OZON_CLIENT_SECRET")
+
     perf_id = str(perf_id or "").strip()
     perf_secret = str(perf_secret or "").strip()
     if not perf_id or not perf_secret:
+        # нет ключей — просто вернём пусто (в UI будет 0)
         return {}
 
     BASE = "https://api-performance.ozon.ru"
 
     # 1) token
-    r = requests.post(
-        f"{BASE}/api/client/token",
-        json={"client_id": perf_id, "client_secret": perf_secret, "grant_type": "client_credentials"},
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
-        timeout=60,
-    )
-    if r.status_code != 200:
-        # 401 = неверные ключи/не тот тип ключа
+    try:
+        r = requests.post(
+            f"{BASE}/api/client/token",
+            json={"client_id": perf_id, "client_secret": perf_secret, "grant_type": "client_credentials"},
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            timeout=60,
+        )
+    except Exception:
         return {}
+
+    if r.status_code != 200:
+        return {}
+
     token = (r.json() or {}).get("access_token") or ""
     if not token:
         return {}
@@ -59,74 +69,104 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json", "Accept": "application/json"}
 
     # 2) generate json report
-    gen = requests.post(
-        f"{BASE}/api/client/statistics/products/generate/json",
-        json={"from": _rfc3339_day(date_from, end=False), "to": _rfc3339_day(date_to, end=True)},
-        headers=headers,
-        timeout=60,
-    )
+    try:
+        gen = requests.post(
+            f"{BASE}/api/client/statistics/products/generate/json",
+            json={"from": _rfc3339_day(date_from, end=False), "to": _rfc3339_day(date_to, end=True)},
+            headers=headers,
+            timeout=60,
+        )
+    except Exception:
+        return {}
+
     if gen.status_code != 200:
         return {}
+
     uuid = (gen.json() or {}).get("UUID") or (gen.json() or {}).get("uuid")
     if not uuid:
         return {}
 
-    # 3) poll report json (ждём, пока отчёт реально станет доступен)
+    # 3) poll report json (ВАЖНО: у Ozon встречаются разные пути выдачи)
     report_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    candidates = [
+        (f"{BASE}/api/client/statistics/report/json", {"UUID": str(uuid)}),
+        (f"{BASE}/api/client/statistics/report", {"UUID": str(uuid), "format": "json"}),
+        (f"{BASE}/api/client/statistics/report", {"UUID": str(uuid)}),
+    ]
 
-    rows = None
-    wait_seconds = 0
-    max_wait_seconds = 10 * 60  # 10 минут
-
-    while wait_seconds < max_wait_seconds:
-        rep = requests.get(
-            f"{BASE}/api/client/statistics/report/json",
-            params={"UUID": str(uuid), "uuid": str(uuid)},  # иногда API ожидает разный регистр
-            headers=report_headers,
-            timeout=60,
-        )
-
-        if rep.status_code == 200:
+    last_err = None
+    data = None
+    for _ in range(90):  # ~180 секунд при sleep 2
+        for url, params in candidates:
             try:
-                data = rep.json()
-            except Exception:
-                return {}
-            rows = (data.get("rows") or [])
+                rep = requests.get(url, params=params, headers=report_headers, timeout=60)
+            except Exception as e:
+                last_err = f"request error: {e}"
+                continue
+
+            if rep.status_code == 200:
+                try:
+                    data = rep.json()
+                except Exception:
+                    # иногда content-type странный, но json есть
+                    try:
+                        data = json.loads(rep.text)
+                    except Exception:
+                        return {}
+                break
+
+            if rep.status_code in (404, 409, 425):
+                # отчёт ещё готовится
+                last_err = f"{rep.status_code} preparing"
+                continue
+
+            # 400/401/5xx — реальные ошибки
+            last_err = f"{rep.status_code} {rep.text[:200]}"
+            return {}
+
+        if data is not None:
             break
+        time.sleep(2)
 
-        # 404/409/425 = отчёт ещё готовится (это нормально)
-        if rep.status_code in (404, 409, 425):
-            time.sleep(3)
-            wait_seconds += 3
-            continue
-
-        # 400/401/5xx — реальные ошибки
+    if data is None:
         return {}
 
-    if not rows:
+    rows = (data.get("rows") or data.get("Rows") or data.get("result") or data.get("data") or [])
+    if not isinstance(rows, list) or not rows:
         return {}
 
     df = pd.DataFrame(rows)
-    if df.empty or "SKU" not in df.columns:
-        return {}
-
-    df["SKU"] = pd.to_numeric(df["SKU"], errors="coerce")
-    df = df.dropna(subset=["SKU"]).copy()
     if df.empty:
         return {}
-    df["SKU"] = df["SKU"].astype(int)
 
-    if "MoneySpentFromCPC" in df.columns:
-        df["MoneySpentFromCPC"] = df["MoneySpentFromCPC"].apply(_parse_ru_money)
-        df["spend_click"] = df["MoneySpentFromCPC"]
-    elif "moneySpentFromCPC" in df.columns:
-        df["moneySpentFromCPC"] = df["moneySpentFromCPC"].apply(_parse_ru_money)
-        df["spend_click"] = df["moneySpentFromCPC"]
+    # SKU
+    if "SKU" in df.columns:
+        sku_field = "SKU"
+    elif "Sku" in df.columns:
+        sku_field = "Sku"
+    elif "sku" in df.columns:
+        sku_field = "sku"
     else:
-        # если вдруг поле переименовали — не падаем
-        df["spend_click"] = 0.0
+        return {}
 
-    agg = df.groupby("SKU", as_index=True)["spend_click"].sum()
+    df[sku_field] = pd.to_numeric(df[sku_field], errors="coerce")
+    df = df.dropna(subset=[sku_field]).copy()
+    if df.empty:
+        return {}
+    df[sku_field] = df[sku_field].astype(int)
+
+    # MoneySpentFromCPC (spend_click)
+    if "MoneySpentFromCPC" in df.columns:
+        col = "MoneySpentFromCPC"
+    elif "moneySpentFromCPC" in df.columns:
+        col = "moneySpentFromCPC"
+    else:
+        # если вдруг переименовали — лучше 0, чем падать
+        return {}
+
+    df["spend_click"] = df[col].apply(_parse_ru_money)
+
+    agg = df.groupby(sku_field, as_index=True)["spend_click"].sum()
     out = {int(k): float(v) for k, v in agg.to_dict().items()}
     return out
 
