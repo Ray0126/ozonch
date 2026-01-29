@@ -122,10 +122,6 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     out = {int(k): float(v) for k, v in agg.to_dict().items()}
     return out
 
-
-
-
-
 def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
     """Эквайринг по SKU за период (как в ЛК).
     Ищем finance-операции с operation_type_name/type_name = 'Оплата эквайринга' (или содержит 'эквайринг').
