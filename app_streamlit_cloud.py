@@ -1382,7 +1382,7 @@ def opex_sum_period(df_opex: pd.DataFrame, d_from: date, d_to: date) -> float:
 
 
 # --- Sidebar COGS ---
-st.sidebar.header("Себестоимость (COGS)")
+st.sidebar.header("Себестоимость")
 ensure_data_dir()
 
 uploaded = st.sidebar.file_uploader(
@@ -2568,38 +2568,6 @@ with tab1:
             .fillna(0.0)
         )
 
-
-        # --- DEBUG: почему реклама (клик) = 0 ---
-        with st.expander("DEBUG: Performance (Реклама клик) — диагностика", expanded=False):
-            st.write("perf_map size:", len(_perf_map))
-            if _perf_map:
-                st.write("perf_map total spend_click:", float(sum(_perf_map.values())))
-                # топ-10 по spend_click
-                top_items = sorted(_perf_map.items(), key=lambda x: x[1], reverse=True)[:10]
-                st.write("TOP-10 spend_click:", top_items)
-            else:
-                st.warning("perf_map пустой — либо отчёт не вернулся, либо ключи/период/эндпоинт не подходят.")
-
-            # проверим совпадение SKU из sold_view с ключами perf_map
-            try:
-                sample = sold_view[["article", "sku"]].head(20).copy() if "article" in sold_view.columns else sold_view[["sku"]].head(20).copy()
-                sample["sku_clean_int"] = (
-                    pd.to_numeric(sample["sku"].astype(str).str.replace(r"[^\d]", "", regex=True), errors="coerce")
-                    .fillna(0).astype(int)
-                )
-                sample["in_perf_map"] = sample["sku_clean_int"].apply(lambda x: int(x) in _perf_map)
-                st.dataframe(sample, use_container_width=True)
-            except Exception as e:
-                st.write("sample check failed:", e)
-
-            # глубокая проверка отчёта (делает отдельные запросы)
-            if st.button("DEBUG: запросить мета отчёта Performance", key="perf_dbg_btn"):
-                try:
-                    info = _perf_products_report_debug(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
-                    st.json(info)
-                except Exception as e:
-                    st.error(f"perf debug failed: {e}")
-
         # Опер. расходы распределяем пропорционально выручке SKU
         opex_period = opex_sum_period(df_opex, d_from, d_to)
         sold_view = allocate_cost_by_share(sold_view, opex_period, "opex_total")
@@ -2620,8 +2588,8 @@ with tab1:
             "logistics": "Услуги/логистика, ₽",
             "acquiring": "Эквайринг, ₽",
             "sale_costs": "Расходы Ozon, ₽",
-            "ads_total": "Реклама, ₽",
-            "ads_spend_click": "Реклама (клик), ₽",
+            "ads_total": "Реклама (клик), ₽",
+            "ads_spend_click": "Реклама (заказ), ₽",
             "cogs_unit": "Себестоимость 1 шт, ₽",
             "cogs_total": "Себестоимость всего, ₽",
             "tax_total": "Налог, ₽",
@@ -2645,7 +2613,7 @@ with tab1:
             axis=1,
         )
         show["ДРР, %"] = show.apply(
-            lambda r: (float(r.get("Реклама, ₽", 0)) / float(r.get("Выручка, ₽", 0)) * 100.0)
+            lambda r: (float(r.get("Реклама (клик), ₽", 0)) / float(r.get("Выручка, ₽", 0)) * 100.0)
             if float(r.get("Выручка, ₽", 0) or 0) else 0.0,
             axis=1,
         )
@@ -2655,7 +2623,7 @@ with tab1:
             "Артикул","SKU","Название",
             "Заказы, шт","Возвраты, шт","Выкуп, шт","% выкупа",
             "Выручка, ₽","Средняя цена продажи, ₽","ДРР, %",
-            "Комиссия, ₽","Услуги/логистика, ₽","Эквайринг, ₽","Расходы Ozon, ₽","Реклама, ₽","Реклама (клик), ₽",
+            "Комиссия, ₽","Услуги/логистика, ₽","Эквайринг, ₽","Расходы Ozon, ₽","Реклама (клик), ₽","Реклама (заказ), ₽",
             "Себестоимость 1 шт, ₽","Себестоимость всего, ₽","Налог, ₽","Опер. расходы, ₽",
             "Прибыль, ₽","Прибыль на 1 шт, ₽","Маржинальность, %","ROI, %"
         ]
@@ -2686,7 +2654,7 @@ with tab1:
         # 6) Денежные колонки (float)
         money_cols = [
             "Выручка, ₽", "Средняя цена продажи, ₽", "Комиссия, ₽", "Услуги/логистика, ₽",
-            "Расходы Ozon, ₽", "Реклама, ₽", "Реклама (клик), ₽",
+            "Расходы Ozon, ₽", "Реклама (клик), ₽", "Реклама (заказ), ₽",
             "Себестоимость 1 шт, ₽", "Себестоимость всего, ₽",
             "Налог, ₽", "Опер. расходы, ₽",
             "Прибыль, ₽", "Прибыль на 1 шт, ₽",
@@ -2778,7 +2746,7 @@ with tab1:
         if "soldsku_last_col" not in st.session_state:
             st.session_state["soldsku_last_col"] = ""
 
-        with st.expander("⚙️ Колонки таблицы", expanded=st.session_state.get("soldsku_cols_expanded", False)):
+        with st.expander("⚙️ Колонки таблицы", expanded=False):
             colA, colB, colC = st.columns([2.2, 1.2, 1.6])
 
             with colA:
@@ -2860,8 +2828,10 @@ with tab1:
                 "Возвраты, шт": st.column_config.NumberColumn(format="%.0f"),
                 "Выкуп, шт": st.column_config.NumberColumn(format="%.0f"),
                 **{c: st.column_config.NumberColumn(format="%.0f") for c in money_cols},
-                "Маржинальность, %": st.column_config.NumberColumn(format="%.1f"),
-                "ROI, %": st.column_config.NumberColumn(format="%.1f"),
+                "% выкупа": st.column_config.NumberColumn(format="%.0f%%"),
+                "ДРР, %": st.column_config.NumberColumn(format="%.1f%%"),
+                "Маржинальность, %": st.column_config.NumberColumn(format="%.1f%%"),
+                "ROI, %": st.column_config.NumberColumn(format="%.1f%%"),
             }
         )
 
