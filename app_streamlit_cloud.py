@@ -1317,7 +1317,45 @@ def _opex_empty() -> pd.DataFrame:
     return pd.DataFrame(columns=["date", "type", "amount"])
 
 def load_opex() -> pd.DataFrame:
+    """Загружает OPEX.
+
+    В Streamlit Cloud файловая система может быть эфемерной, поэтому:
+    1) если USE_SUPABASE=True — сначала читаем из Supabase таблицу `opex`;
+    2) иначе / если не удалось — читаем локальный CSV (fallback).
+    """
     ensure_data_dir()
+
+    # 1) Supabase (приоритет)
+    if USE_SUPABASE:
+        try:
+            df = _sb_fetch("opex", select="date,type,amount", limit=100000)
+            if df is not None and not df.empty:
+                df.columns = [str(c).strip().lower() for c in df.columns]
+                # ожидаем: date, type, amount
+                if "date" not in df.columns and "дата" in df.columns:
+                    df = df.rename(columns={"дата": "date"})
+                if "type" not in df.columns:
+                    for c in df.columns:
+                        if "тип" in c or "category" in c:
+                            df = df.rename(columns={c: "type"})
+                            break
+                if "amount" not in df.columns:
+                    for c in df.columns:
+                        if "сумм" in c or "amount" in c:
+                            df = df.rename(columns={c: "amount"})
+                            break
+                if {"date","type","amount"}.issubset(set(df.columns)):
+                    df = df[["date","type","amount"]].copy()
+                    df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+                    df["type"] = df["type"].fillna("").astype(str)
+                    df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
+                    df = df.dropna(subset=["date"]).sort_values(["date","type"]).reset_index(drop=True)
+                    return df
+        except Exception:
+            # упали на Supabase — идём в локальный fallback
+            pass
+
+    # 2) Локальный CSV (fallback)
     if os.path.exists(OPEX_PATH):
         try:
             df = pd.read_csv(OPEX_PATH, encoding="utf-8-sig")
@@ -1347,6 +1385,16 @@ def load_opex() -> pd.DataFrame:
             return df
         except Exception:
             return _opex_empty()
+
+    return _opex_empty()
+            df = df[["date","type","amount"]].copy()
+            df["date"] = pd.to_datetime(df["date"], errors="coerce").dt.date
+            df["type"] = df["type"].fillna("").astype(str)
+            df["amount"] = pd.to_numeric(df["amount"], errors="coerce").fillna(0.0)
+            df = df.dropna(subset=["date"]).sort_values(["date","type"]).reset_index(drop=True)
+            return df
+        except Exception:
+            return _opex_empty()
     return _opex_empty()
 
 def save_opex(df: pd.DataFrame):
@@ -1367,7 +1415,7 @@ def save_opex(df: pd.DataFrame):
         rows = df2.copy()
         rows["date"] = pd.to_datetime(rows["date"], errors="coerce").dt.strftime("%Y-%m-%d")
         payload = rows.to_dict(orient="records")
-        _sb_replace_all("opex", payload, "id=gt.0")
+        _sb_replace_all("opex", payload, "date=gte.1900-01-01")
 
     # 2) Локально
     out = df2.copy()
