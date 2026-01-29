@@ -6,34 +6,12 @@ import requests
 import streamlit as st
 import pandas as pd
 
-def _strip_quotes(v: str) -> str:
-    v = str(v or "").strip()
-    if len(v) >= 2 and ((v[0] == v[-1] == '"') or (v[0] == v[-1] == "'")):
-        v = v[1:-1].strip()
-    return v
-
-
 # ================== PERFORMANCE PRODUCTS REPORT (Spend Click by SKU) ==================
 def _rfc3339_day(s: str, end: bool = False) -> str:
-    """Ozon Performance products report expects RFC3339 datetimes.
-    В отчётах Ozon обычно используется диапазон [from, to), поэтому:
-      - from = YYYY-MM-DDT00:00:00Z
-      - to   = (date_to + 1 day)T00:00:00Z  (если передали дату без времени)
-    """
     s = str(s or "").strip()
-    if not s:
-        return ""
     if "T" in s:
-        return s  # уже RFC3339
-    try:
-        d = datetime.date.fromisoformat(s)
-    except Exception:
-        # fallback как было
-        return f"{s}T23:59:59Z" if end else f"{s}T00:00:00Z"
-    if end:
-        d = d + datetime.timedelta(days=1)
-    return f"{d.isoformat()}T00:00:00Z"
-
+        return s
+    return f"{s}T23:59:59Z" if end else f"{s}T00:00:00Z"
 
 def _parse_ru_money(x) -> float:
     """Парсит деньги из строк вида '1 234,56', '-', '—', None."""
@@ -57,8 +35,8 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     """
     perf_id = (st.secrets.get("PERF_CLIENT_ID", None) if hasattr(st, "secrets") else None) or os.getenv("PERF_CLIENT_ID") or os.getenv("OZON_PERF_CLIENT_ID") or os.getenv("OZON_CLIENT_ID")
     perf_secret = (st.secrets.get("PERF_CLIENT_SECRET", None) if hasattr(st, "secrets") else None) or os.getenv("PERF_CLIENT_SECRET") or os.getenv("OZON_PERF_CLIENT_SECRET") or os.getenv("OZON_CLIENT_SECRET")
-    perf_id = _strip_quotes(perf_id)
-    perf_secret = _strip_quotes(perf_secret)
+    perf_id = str(perf_id or "").strip()
+    perf_secret = str(perf_secret or "").strip()
     if not perf_id or not perf_secret:
         return {}
 
