@@ -7,22 +7,11 @@ import streamlit as st
 import pandas as pd
 
 # ================== PERFORMANCE PRODUCTS REPORT (Spend Click by SKU) ==================
-def _rfc3339_start_day(s: str) -> str:
+def _rfc3339_day(s: str, end: bool = False) -> str:
     s = str(s or "").strip()
     if "T" in s:
         return s
-    return f"{s}T00:00:00Z"
-
-def _rfc3339_next_day_start(s: str) -> str:
-    """to = следующий день 00:00:00Z (часто Performance трактует период как [from,to))."""
-    from datetime import datetime, timedelta
-    s = str(s or "").strip()
-    if "T" in s:
-        # если уже RFC3339 — не трогаем
-        return s
-    d = datetime.strptime(s, "%Y-%m-%d").date()
-    d2 = d + timedelta(days=1)
-    return f"{d2.isoformat()}T00:00:00Z"
+    return f"{s}T23:59:59Z" if end else f"{s}T00:00:00Z"
 
 def _parse_ru_money(x) -> float:
     """Парсит деньги из строк вида '1 234,56', '-', '—', None."""
@@ -72,7 +61,7 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     # 2) generate json report
     gen = requests.post(
         f"{BASE}/api/client/statistics/products/generate/json",
-        json={"from": _rfc3339_start_day(date_from), "to": _rfc3339_next_day_start(date_to)},
+        json={"from": _rfc3339_day(date_from, end=False), "to": _rfc3339_day(date_to, end=True)},
         headers=headers,
         timeout=60,
     )
@@ -89,7 +78,7 @@ def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     for _ in range(90):  # ~180 сек при sleep 2
         rep = requests.get(
             f"{BASE}/api/client/statistics/report/json",
-            params={"UUID": str(uuid), "uuid": str(uuid)},
+            params={"UUID": str(uuid)},
             headers=report_headers,
             timeout=60,
         )
@@ -2225,6 +2214,8 @@ with tab1:
         _block_with_retry(ops_err_title, ops_err_details, cache_clear_fn=load_ops_range.clear)
 
 
+    # ================== DEBUG: разбор логистики по одному артикулу (Polyarnaya-210) ==================
+    # ================== DEBUG: РАЗБОР УСЛУГ (services) ИЗ СЫРЫХ ОПЕРАЦИЙ ==================
     df_ops = ops_to_df(ops_now)
     # Эквайринг: распределяем по SKU на полном df_ops (по posting_number)
     df_ops = allocate_acquiring_cost_by_posting(df_ops)
@@ -2413,7 +2404,14 @@ with tab1:
             st.caption("Performance API: не удалось получить данные по рекламе — колонка будет 0.")
 
         sold_view["ads_spend_click"] = (
-            pd.to_numeric(sold_view["sku"], errors="coerce").fillna(0).astype(int).map(_perf_map).fillna(0.0)
+            pd.to_numeric(
+                sold_view["sku"].astype(str).str.replace(r"[^\d]", "", regex=True),
+                errors="coerce"
+            )
+            .fillna(0)
+            .astype(int)
+            .map(_perf_map)
+            .fillna(0.0)
         )
 
 
