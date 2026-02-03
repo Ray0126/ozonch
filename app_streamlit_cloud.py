@@ -2120,13 +2120,40 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
     sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
 
-    # отдельно “Баллы за скидки” и “Программы партнёров”
-    sku_df["bonus_cost"] = (-sku_df.get("bonus_points", 0)).clip(lower=0.0)
-    sku_df["partner_cost"] = (-sku_df.get("partner_programs", 0)).clip(lower=0.0)
+    # “Баллы за скидки” и “Программы партнёров” (в ЛК идут ПЛЮСОМ к выручке)
+    sku_df["bonus_amt"] = pd.to_numeric(sku_df.get("bonus_points", 0), errors="coerce").fillna(0.0)
+    sku_df["partner_amt"] = pd.to_numeric(sku_df.get("partner_programs", 0), errors="coerce").fillna(0.0)
+
 
     # количества
-    sku_df["qty_orders"] = sku_df.apply(lambda r: r["qty"] if r["type"] == "orders" else 0.0, axis=1)
-    sku_df["qty_returns"] = sku_df.apply(lambda r: r["qty"] if r["type"] == "returns" else 0.0, axis=1)
+    # Важно: в finance API поле `type` не всегда строго = orders/returns для всех строк,
+    # которые ЛК относит к заказам/возвратам. Поэтому классифицируем по названию операции и знаку выручки.
+    def _qty_kind(row) -> str:
+        t = str(row.get("type", "")).lower()
+        name = str(row.get("type_name", "")).lower()
+        code = str(row.get("operation_type", "")).lower()
+        s = f"{t} {name} {code}"
+
+        # Возвраты/сторно
+        if any(k in s for k in ["возврат", "return", "refund", "сторно", "отмена", "cancell"]):
+            return "returns"
+
+        # Продажи/реализация/доставка (выкуп)
+        if any(k in s for k in ["продаж", "реализац", "выкуп", "sale", "delivered", "достав", "передан"]):
+            return "orders"
+
+        # Фоллбек по знаку выручки
+        accr = _to_float(row.get("accruals_for_sale", 0))
+        if accr < 0:
+            return "returns"
+        if accr > 0:
+            return "orders"
+        return ""
+
+    sku_df["_qty_kind"] = sku_df.apply(_qty_kind, axis=1)
+    sku_df["qty_orders"] = sku_df.apply(lambda r: r["qty"] if r["_qty_kind"] == "orders" else 0.0, axis=1)
+    sku_df["qty_returns"] = sku_df.apply(lambda r: r["qty"] if r["_qty_kind"] == "returns" else 0.0, axis=1)
+
 
     g = (
         sku_df.groupby(["sku"], as_index=False)
@@ -2139,8 +2166,8 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
             commission=("commission_cost", "sum"),
             logistics=("services_cost", "sum"),
             acquiring_amount=("acquiring_amount", "sum"),
-            bonus_points=("bonus_cost", "sum"),
-            partner_programs=("partner_cost", "sum"),
+            bonus_points=("bonus_amt", "sum"),
+            partner_programs=("partner_amt", "sum"),
         )
     )
 
@@ -2153,8 +2180,8 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
         g["acquiring"] = 0.0
     g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
 
-    # ВАЖНО: “Выручка” как в ЛК = GrossSales - Баллы - Партнерки
-    g["accruals_net"] = g["gross_sales"] - g["bonus_points"] - g["partner_programs"]
+    # ВАЖНО: “Выручка” как в ЛК = Выручка Ozon + Баллы за скидки + Программы партнёров
+    g["accruals_net"] = g["gross_sales"] + g["bonus_points"] + g["partner_programs"]
 
     g["sale_costs"] = g["commission"] + g["logistics"] + g["acquiring"]
 
@@ -2449,6 +2476,47 @@ with tab1:
         df_ops_prev = redistribute_ops_without_items(df_ops_prev)  # ✅ ДОБАВИТЬ
 
     sold = build_sold_sku_table(df_ops, cogs_df)
+
+    # --- DEBUG: разрез операций по одному SKU (помогает найти расхождения с ЛК)
+    debug_sku = st.sidebar.text_input(
+        "DEBUG SKU (опционально)",
+        value="",
+        help="Введите SKU, чтобы увидеть разрез операций и понять, какие типы не попали в заказы/возвраты.",
+    )
+    if str(debug_sku).strip().isdigit():
+        _sku = int(str(debug_sku).strip())
+        with st.expander(f"DEBUG: операции по SKU {_sku}", expanded=False):
+            _ops = df_ops.copy()
+            _ops["sku"] = pd.to_numeric(_ops.get("sku"), errors="coerce").astype("Int64")
+            _ops = _ops[_ops["sku"] == _sku].copy()
+            if _ops.empty:
+                st.info("По этому SKU нет операций в выбранном периоде.")
+            else:
+                # Короткий свод по типам
+                cols = [
+                    "operation_date",
+                    "type",
+                    "operation_type",
+                    "type_name",
+                    "posting_number",
+                    "qty",
+                    "accruals_for_sale",
+                    "sale_commission",
+                    "services_sum",
+                    "acquiring_amount_alloc" if "acquiring_amount_alloc" in _ops.columns else "acquiring_amount",
+                    "bonus_points",
+                    "partner_programs",
+                    "amount",
+                ]
+                cols = [c for c in cols if c in _ops.columns]
+                st.dataframe(_ops[cols].sort_values("operation_date"))
+
+                gb_cols = [c for c in ["type", "operation_type", "type_name"] if c in _ops.columns]
+                if gb_cols:
+                    agg_map = {c: "sum" for c in ["qty", "accruals_for_sale", "sale_commission", "services_sum", "bonus_points", "partner_programs", "amount"] if c in _ops.columns}
+                    gdebug = _ops.groupby(gb_cols, as_index=False).agg(agg_map)
+                    st.write("Свод по типам операций:")
+                    st.dataframe(gdebug.sort_values("accruals_for_sale", ascending=False))
     sold_prev = build_sold_sku_table(df_ops_prev, cogs_df) if not df_ops_prev.empty else pd.DataFrame()
 
     k = calc_kpi(df_ops, sold)
