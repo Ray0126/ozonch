@@ -77,60 +77,60 @@ class OzonSellerClient:
         return r.json()
 
     def fetch_finance_transactions(self, date_from: str, date_to: str, page_size: int = 1000):
-    """
-    Fetches /v3/finance/transaction/list with stable pagination.
+        """
+        Fetches /v3/finance/transaction/list with stable pagination.
 
-    IMPORTANT:
-    - We page until page_count (if provided) OR until an empty page.
-    - We do NOT rely on len(ops) < page_size, because Ozon can return
-      a short page before the end (e.g. internal limits / filtering).
-    """
-    all_ops: list[dict] = []
-    page = 1
-    max_pages_guard = 5000  # safety to avoid infinite loops
+        IMPORTANT:
+        - We page until page_count (if provided) OR until an empty page.
+        - We do NOT rely on len(ops) < page_size, because Ozon can return
+          a short page before the end (e.g. internal limits / filtering).
+        """
+        all_ops: list[dict] = []
+        page = 1
+        max_pages_guard = 5000  # safety to avoid infinite loops
 
-    while page <= max_pages_guard:
-        body = {
-            "filter": {
-                "date": {
-                    "from": _as_dt_str(date_from, end=False),
-                    "to": _as_dt_str(date_to, end=True),
+        while page <= max_pages_guard:
+            body = {
+                "filter": {
+                    "date": {
+                        "from": _as_dt_str(date_from, end=False),
+                        "to": _as_dt_str(date_to, end=True),
+                    },
+                    # keep other filters empty = all
+                    "operation_type": [],
+                    "posting_number": "",
+                    "transaction_type": "all",
                 },
-                # keep other filters empty = all
-                "operation_type": [],
-                "posting_number": "",
-                "transaction_type": "all",
-            },
-            "page": page,
-            "page_size": page_size,
-        }
+                "page": page,
+                "page_size": page_size,
+            }
 
-        resp = self.post("/v3/finance/transaction/list", body)
-        result = resp.get("result", {}) if isinstance(resp, dict) else {}
-        if not isinstance(result, dict):
-            break
-
-        ops = result.get("operations") or []
-        if not isinstance(ops, list):
-            ops = []
-
-        if not ops:
-            # empty page => no more data
-            break
-
-        all_ops.extend(ops)
-
-        page_count = result.get("page_count")
-        if page_count is not None:
-            try:
-                page_count_int = int(page_count)
-            except Exception:
-                page_count_int = None
-
-            if page_count_int is not None and page >= page_count_int:
+            resp = self.post("/v3/finance/transaction/list", body)
+            result = resp.get("result", {}) if isinstance(resp, dict) else {}
+            if not isinstance(result, dict):
                 break
 
-        page += 1
-        time.sleep(0.12)
+            ops = result.get("operations") or []
+            if not isinstance(ops, list):
+                ops = []
 
-    return all_ops
+            if not ops:
+                # empty page => no more data
+                break
+
+            all_ops.extend(ops)
+
+            page_count = result.get("page_count")
+            if page_count is not None:
+                try:
+                    page_count_int = int(page_count)
+                except Exception:
+                    page_count_int = None
+
+                if page_count_int is not None and page >= page_count_int:
+                    break
+
+            page += 1
+            time.sleep(0.12)
+
+        return all_ops
