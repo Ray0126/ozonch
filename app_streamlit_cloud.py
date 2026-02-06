@@ -2551,7 +2551,10 @@ with tab1:
         df_ops_prev = ops_to_df(ops_prev)
         df_ops_prev = redistribute_ops_without_items(df_ops_prev)  # ✅ ДОБАВИТЬ
 
-    analytics_df, ana_err_title, ana_err_details = load_analytics_range(date_from_str, date_to_str)
+    analytics_df, ana_err_title, ana_err_details = load_analytics_range(
+        date_from.strftime("%Y-%m-%d"),
+        date_to.strftime("%Y-%m-%d"),
+    )
     if ana_err_title:
         st.warning(f"Analytics (qty) не загрузились: {ana_err_title}")
         with st.expander("Details", expanded=False):
