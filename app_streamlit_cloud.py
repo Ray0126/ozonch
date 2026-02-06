@@ -2568,7 +2568,7 @@ with tab1:
         else:
             st.sidebar.caption("Analytics columns: " + ", ".join(list(analytics_df.columns)[:8]))
 
-sold = build_sold_sku_table(df_ops, cogs_df, analytics_df)
+    sold = build_sold_sku_table(df_ops, cogs_df, analytics_df)
 
     # --- DEBUG: разрез операций по одному SKU (помогает найти расхождения с ЛК)
     debug_sku = st.sidebar.text_input(
