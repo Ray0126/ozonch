@@ -2559,7 +2559,16 @@ with tab1:
         st.warning(f"Analytics (qty) не загрузились: {ana_err_title}")
         with st.expander("Details", expanded=False):
             st.write(ana_err_details)
-    sold = build_sold_sku_table(df_ops, cogs_df, analytics_df)
+    
+    # --- DIAGNOSTIC: show whether Analytics qty loaded (must be non-empty to change qty)
+    if isinstance(analytics_df, pd.DataFrame):
+        st.sidebar.caption(f"Analytics rows: {len(analytics_df)}")
+        if len(analytics_df) == 0:
+            st.sidebar.error("Analytics вернул 0 строк → qty останется как в Finance (это и даёт 80 вместо 112).")
+        else:
+            st.sidebar.caption("Analytics columns: " + ", ".join(list(analytics_df.columns)[:8]))
+
+sold = build_sold_sku_table(df_ops, cogs_df, analytics_df)
 
     # --- DEBUG: разрез операций по одному SKU (помогает найти расхождения с ЛК)
     debug_sku = st.sidebar.text_input(
