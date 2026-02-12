@@ -1748,44 +1748,6 @@ def load_ops_range(date_from_str: str, date_to_str: str) -> tuple[list[dict], st
         title, details = _humanize_ozon_error(e)
         return [], title, details
 
-
-def _merge_analytics_chunks(chunks: list[list[dict]]) -> pd.DataFrame:
-    # Sum units per SKU across chunks
-    if not chunks:
-        return pd.DataFrame()
-    rows = []
-    for part in chunks:
-        if part:
-            rows.extend(part)
-    if not rows:
-        return pd.DataFrame()
-    df = pd.DataFrame(rows)
-    if df.empty or "sku" not in df.columns:
-        return pd.DataFrame()
-    for c in ["ordered_units", "delivered_units", "returned_units", "cancelled_units"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
-        else:
-            df[c] = 0.0
-    return df.groupby("sku", as_index=False)[["ordered_units","delivered_units","returned_units","cancelled_units"]].sum()
-
-
-@st.cache_data(ttl=3600)
-def load_analytics_range(date_from_str: str, date_to_str: str) -> tuple[pd.DataFrame, str, str]:
-    d1 = datetime.strptime(date_from_str, "%Y-%m-%d").date()
-    d2 = datetime.strptime(date_to_str, "%Y-%m-%d").date()
-
-    parts = []
-    try:
-        for a, b in month_safe_chunks(d1, d2):
-            # Analytics API expects YYYY-MM-DD (no Z). We keep it consistent with UI.
-            part = client.fetch_analytics_sku_units(a.strftime("%Y-%m-%d"), b.strftime("%Y-%m-%d"))
-            parts.append(part)
-        df = _merge_analytics_chunks(parts)
-        return df, "", ""
-    except Exception as e:
-        title, details = _humanize_ozon_error(e)
-        return pd.DataFrame(), title, details
 @st.cache_data(ttl=600)
 def load_ads_summary(date_from_str: str, date_to_str: str) -> dict:
     base = {"spent": 0.0, "revenue": 0.0, "orders": 0, "drr": 0.0, "cpc": 0.0, "ctr": 0.0, "_note": "", "_debug": {}}
@@ -2140,7 +2102,7 @@ def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd
 
 
 # ================== SOLD SKU TABLE ==================
-def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame, analytics_units=None) -> pd.DataFrame:
+def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
     # Эквайринг: распределяем acquiring_amount по SKU на уровне posting_number (до фильтрации sku)
     df_ops = allocate_acquiring_amount_by_posting(df_ops)
 
@@ -2209,53 +2171,15 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame, anal
         )
     )
 
-    # --- Количества (Orders / Buyout / Returns) должны совпадать с ЛК.
-    # ВАЖНО: ЛК (юнит-экономика) считает количества по Analytics, а не по Finance.
-    # Finance-операции по "Доставка покупателю" могут приходить в другом месяце, поэтому qty из Finance будет меньше.
-    if analytics_units is not None and not analytics_units.empty and "sku" in analytics_units.columns:
-        au = analytics_units.copy()
-        au["sku"] = pd.to_numeric(au["sku"], errors="coerce").astype("Int64")
-        au = au.dropna(subset=["sku"]).copy()
-        au["sku"] = au["sku"].astype(int)
-
-        # normalize columns
-        colmap = {
-            "ordered_units": "qty_orders_analytics",
-            "delivered_units": "qty_delivered_analytics",
-            "returned_units": "qty_returns_analytics",
-            "cancelled_units": "qty_cancelled_analytics",
-        }
-        for src, dst in colmap.items():
-            if src in au.columns:
-                au[dst] = pd.to_numeric(au[src], errors="coerce").fillna(0.0)
-            else:
-                au[dst] = 0.0
-
-        au = au[["sku"] + list(colmap.values())]
-        g = g.merge(au, on="sku", how="left")
-
-        # Keep finance-based qty for debug
-        g["qty_orders_finance"] = g["qty_orders"]
-        g["qty_returns_finance"] = g["qty_returns"]
-
-        # Override with Analytics (if present)
-        g["qty_orders"] = g["qty_orders_analytics"].fillna(0.0)
-        g["qty_returns"] = g["qty_returns_analytics"].fillna(0.0)
-
-        # Buyout: prefer delivered_units, else ordered - returned
-        delivered = g.get("qty_delivered_analytics")
-        if delivered is not None:
-            g["qty_buyout"] = delivered.fillna(0.0)
-        else:
-            g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
-    else:
-        g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
+    
 
     # Эквайринг (как в ЛК): NЕТТО по amount, затем переводим в расход (плюс)
     if "acquiring_amount" in g.columns:
         g["acquiring"] = (-pd.to_numeric(g["acquiring_amount"], errors="coerce").fillna(0.0)).clip(lower=0.0)
     else:
         g["acquiring"] = 0.0
+    g["qty_buyout"] = g["qty_orders"] - g["qty_returns"]
+
     # ВАЖНО: “Выручка” как в ЛК = Выручка Ozon + Баллы за скидки + Программы партнёров
     g["accruals_net"] = g["gross_sales"] + g["bonus_points"] + g["partner_programs"]
 
@@ -2551,24 +2475,7 @@ with tab1:
         df_ops_prev = ops_to_df(ops_prev)
         df_ops_prev = redistribute_ops_without_items(df_ops_prev)  # ✅ ДОБАВИТЬ
 
-    analytics_df, ana_err_title, ana_err_details = load_analytics_range(
-        d_from.strftime("%Y-%m-%d"),
-        d_to.strftime("%Y-%m-%d"),
-    )
-    if ana_err_title:
-        st.warning(f"Analytics (qty) не загрузились: {ana_err_title}")
-        with st.expander("Details", expanded=False):
-            st.write(ana_err_details)
-    
-    # --- DIAGNOSTIC: show whether Analytics qty loaded (must be non-empty to change qty)
-    if isinstance(analytics_df, pd.DataFrame):
-        st.sidebar.caption(f"Analytics rows: {len(analytics_df)}")
-        if len(analytics_df) == 0:
-            st.sidebar.error("Analytics вернул 0 строк → qty останется как в Finance (это и даёт 80 вместо 112).")
-        else:
-            st.sidebar.caption("Analytics columns: " + ", ".join(list(analytics_df.columns)[:8]))
-
-    sold = build_sold_sku_table(df_ops, cogs_df, analytics_df)
+    sold = build_sold_sku_table(df_ops, cogs_df)
 
     # --- DEBUG: разрез операций по одному SKU (помогает найти расхождения с ЛК)
     debug_sku = st.sidebar.text_input(
@@ -2610,8 +2517,7 @@ with tab1:
                     gdebug = _ops.groupby(gb_cols, as_index=False).agg(agg_map)
                     st.write("Свод по типам операций:")
                     st.dataframe(gdebug.sort_values("accruals_for_sale", ascending=False))
-    analytics_prev_df, _, _ = load_analytics_range(prev_from.strftime('%Y-%m-%d'), prev_to.strftime('%Y-%m-%d')) if (not df_ops_prev.empty and prev_from <= prev_to) else (pd.DataFrame(), '', '')
-    sold_prev = build_sold_sku_table(df_ops_prev, cogs_df, analytics_prev_df) if not df_ops_prev.empty else pd.DataFrame()
+    sold_prev = build_sold_sku_table(df_ops_prev, cogs_df) if not df_ops_prev.empty else pd.DataFrame()
 
     k = calc_kpi(df_ops, sold)
     k_prev = calc_kpi(df_ops_prev, sold_prev)
@@ -3744,8 +3650,7 @@ with tab3:
         st.stop()
 
     # 1) Берём ту же SKU-таблицу, что и в TAB1 (там уже есть комиссии/логистика/COGS/артикулы)
-    analytics_abc_df, _, _ = load_analytics_range(d_from_abc.strftime("%Y-%m-%d"), d_to_abc.strftime("%Y-%m-%d"))
-    sold_abc = build_sold_sku_table(df, cogs_df, analytics_abc_df)
+    sold_abc = build_sold_sku_table(df, cogs_df)
     if sold_abc is None or sold_abc.empty:
         st.info("Нет операций со SKU за выбранный период.")
         st.stop()
