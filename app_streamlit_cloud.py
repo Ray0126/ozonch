@@ -2115,32 +2115,49 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["sku"] = sku_df["sku"].astype(int)
 
     # расходы (в API обычно минусом)
-    # ВАЖНО: НЕ clip() — в ЛК встречаются сторно/корректировки (плюсовые значения),
-    # их нельзя обрезать, иначе "комиссия/услуги" будут считаться по-старому и расходиться.
-    sku_df["commission_cost"] = -pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
-    sku_df["services_cost"]   = -pd.to_numeric(sku_df.get("services_sum", 0),   errors="coerce").fillna(0.0)
+    # Комиссия OZON (расход): берём sale_commission из finance API (обычно приходит минусом),
+    # приводим к расходу простым сменой знака БЕЗ clip() — чтобы учесть корректировки/сторно.
+    sku_df["commission"] = -pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
 
-    # Разбивка услуг/логистики по "ЛК-похожим" корзинам (по названию операции).
-    # Это НЕ влияет на эквайринг (он считается отдельно и остается как есть).
-    tname = sku_df.get("type_name", "").astype(str).str.lower()
-    ocode = sku_df.get("operation_type", "").astype(str).str.lower()
-    s = (tname + " " + ocode)
+    # Услуги/логистика (расход): services_sum обычно приходит минусом, приводим к расходу сменой знака (без clip()).
+    sku_df["_service_cost"] = -pd.to_numeric(sku_df.get("services_sum", 0), errors="coerce").fillna(0.0)
 
-    is_last_mile = s.str.contains("доставка покупателю|последняя миля")
-    is_ship_proc = s.str.contains("обработка отправления|drop-off|pick-up")
-    is_return_proc = s.str.contains("обработка возврата|доставка и обработка возврата")
-    is_return_log = s.str.contains("получение возврата|обратн") | (s.str.contains("невыкуп|отмена") & s.str.contains("достав"))
-    # "Логистика" — все, что похоже на доставку/магистраль/кроссдок/СЦ/ПВЗ, кроме выделенных выше
-    is_log_main = s.str.contains("достав|магистраль|кросс|сц/пвз|сц|пвз") & ~(is_last_mile | is_ship_proc | is_return_proc | is_return_log)
+    # Разбивка услуг на подкатегории (приближенно к ЛК). Если нужно — подстроим по твоим точным названиям.
+    sname = sku_df.get("type_name", "").astype(str).str.lower()
+    sku_df["logistics_main"] = sku_df["_service_cost"].where(
+        sname.str.contains("доставка покупателю|кросс-док|магистраль|последняя миля|drop-off|pick-up", regex=True),
+        0.0,
+    )
+    sku_df["logistics_return"] = sku_df["_service_cost"].where(
+        sname.str.contains("возврат|невыкуп|отмена|обратн", regex=True),
+        0.0,
+    )
+    sku_df["shipment_processing"] = sku_df["_service_cost"].where(
+        sname.str.contains("обработка отправ", regex=True),
+        0.0,
+    )
+    sku_df["return_processing"] = sku_df["_service_cost"].where(
+        sname.str.contains("обработка возв", regex=True),
+        0.0,
+    )
+    sku_df["last_mile"] = sku_df["_service_cost"].where(
+        sname.str.contains("последняя миля", regex=True),
+        0.0,
+    )
 
-    sku_df["svc_last_mile"] = sku_df["services_cost"].where(is_last_mile, 0.0)
-    sku_df["svc_ship_proc"] = sku_df["services_cost"].where(is_ship_proc, 0.0)
-    sku_df["svc_return_proc"] = sku_df["services_cost"].where(is_return_proc, 0.0)
-    sku_df["svc_return_log"] = sku_df["services_cost"].where(is_return_log, 0.0)
-    sku_df["svc_logistics"] = sku_df["services_cost"].where(is_log_main, 0.0)
+    # Прочие услуги (остаток, чтобы сумма сходилась)
+    sku_df["services_other"] = (
+        sku_df["_service_cost"]
+        - sku_df["logistics_main"]
+        - sku_df["logistics_return"]
+        - sku_df["shipment_processing"]
+        - sku_df["return_processing"]
+        - sku_df["last_mile"]
+    )
 
-    used = (sku_df["svc_last_mile"] + sku_df["svc_ship_proc"] + sku_df["svc_return_proc"] + sku_df["svc_return_log"] + sku_df["svc_logistics"])
-    sku_df["svc_other"] = sku_df["services_cost"] - used
+    # Итоговая "logistics" (для совместимости с остальным кодом) = сумма всех услуг/логистики
+    sku_df["logistics"] = sku_df["_service_cost"]
+
     # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
     sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
 
@@ -2187,14 +2204,14 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
             qty_returns=("qty_returns", "sum"),
             gross_sales=("accruals_for_sale", "sum"),
             amount_net=("amount", "sum"),
-            commission=("commission_cost", "sum"),
-            logistics=("services_cost", "sum"),
-            logistics_main=("svc_logistics", "sum"),
-            logistics_return=("svc_return_log", "sum"),
-            last_mile=("svc_last_mile", "sum"),
-            shipment_processing=("svc_ship_proc", "sum"),
-            return_processing=("svc_return_proc", "sum"),
-            services_other=("svc_other", "sum"),
+            commission=("commission", "sum"),
+            logistics=("logistics", "sum"),
+            logistics_main=("logistics_main", "sum"),
+            logistics_return=("logistics_return", "sum"),
+            last_mile=("last_mile", "sum"),
+            shipment_processing=("shipment_processing", "sum"),
+            return_processing=("return_processing", "sum"),
+            services_other=("services_other", "sum"),
             acquiring_amount=("acquiring_amount", "sum"),
             bonus_points=("bonus_amt", "sum"),
             partner_programs=("partner_amt", "sum"),
