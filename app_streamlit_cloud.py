@@ -2121,8 +2121,8 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # Логистика и услуги: собираем НЕТТО из всех "логистических" начислений (по логике ЛК-отчёта),
     # затем переводим в расход (+). Эквайринг сюда НЕ включаем (он считается отдельной логикой ниже).
     s_services = pd.to_numeric(sku_df.get("services_sum", 0), errors="coerce").fillna(0.0)
-    s_delivery = pd.to_numeric(sku_df.get("delivery_charge", 0), errors="coerce").fillna(0.0)
-    s_return_delivery = pd.to_numeric(sku_df.get("return_delivery_charge", 0), errors="coerce").fillna(0.0)
+    s_delivery = pd.to_numeric(sku_df["delivery_charge"], errors="coerce").fillna(0.0) if "delivery_charge" in sku_df.columns else pd.Series(0.0, index=sku_df.index)
+    s_return_delivery = pd.to_numeric(sku_df["return_delivery_charge"], errors="coerce").fillna(0.0) if "return_delivery_charge" in sku_df.columns else pd.Series(0.0, index=sku_df.index)
 
     # Доп. логистические услуги, которые могут приходить отдельными операциями без services_sum:
     # ориентируемся на названия из ЛК (сборка/обработка/магистраль/последняя миля/логистика).
