@@ -2114,27 +2114,45 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df = sku_df.dropna(subset=["sku"]).copy()
     sku_df["sku"] = sku_df["sku"].astype(int)
 
-    # расходы (в API обычно минусом / иногда со сторно) — считаем ОДНИМ способом, без clip()
-# Комиссия (вознаграждение Ozon): в API обычно отрицательная → переводим в "расход" (плюс)
-sku_df["commission_cost"] = -pd.to_numeric(sku_df.get("sale_commission", 0.0), errors="coerce").fillna(0.0)
+    # расходы (в API обычно минусом)
+    # Комиссия: берём НЕТТО со знаком (учитываем корректировки/сторно), затем переводим в расход (+)
+    sku_df["commission_cost"] = -pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
 
-# Логистика и услуги (как в ЛК): берём ВСЕ логистические начисления из finance-операций:
-# - services_sum (в ops_to_df это уже "services_other" без эквайринга/баллов/партнёров/ads_order)
-# - delivery_charge
-# - return_delivery_charge
-def _as_cost(v):
-    v = float(v or 0.0)
-    return (-v) if v < 0 else v
+    # Логистика и услуги: собираем НЕТТО из всех "логистических" начислений (по логике ЛК-отчёта),
+    # затем переводим в расход (+). Эквайринг сюда НЕ включаем (он считается отдельной логикой ниже).
+    s_services = pd.to_numeric(sku_df.get("services_sum", 0), errors="coerce").fillna(0.0)
+    s_delivery = pd.to_numeric(sku_df.get("delivery_charge", 0), errors="coerce").fillna(0.0)
+    s_return_delivery = pd.to_numeric(sku_df.get("return_delivery_charge", 0), errors="coerce").fillna(0.0)
 
-sku_df["_services_cost_raw"] = pd.to_numeric(sku_df.get("services_sum", 0.0), errors="coerce").fillna(0.0)
-sku_df["_delivery_raw"] = pd.to_numeric(sku_df.get("delivery_charge", 0.0), errors="coerce").fillna(0.0)
-sku_df["_return_delivery_raw"] = pd.to_numeric(sku_df.get("return_delivery_charge", 0.0), errors="coerce").fillna(0.0)
+    # Доп. логистические услуги, которые могут приходить отдельными операциями без services_sum:
+    # ориентируемся на названия из ЛК (сборка/обработка/магистраль/последняя миля/логистика).
+    _name = sku_df.get("type_name", "").astype(str).str.lower()
+    _code = sku_df.get("operation_type", "").astype(str).str.lower()
+    _s = (_name + " " + _code)
 
-sku_df["logistics_services_cost"] = (
-    sku_df["_services_cost_raw"].apply(_as_cost)
-    + sku_df["_delivery_raw"].apply(_as_cost)
-    + sku_df["_return_delivery_raw"].apply(_as_cost)
-)
+    logistics_keywords = [
+        "сборк",
+        "обработка отправ",
+        "drop-off", "dropoff", "pick-up", "pickup",
+        "магистраль",
+        "последняя миля",
+        "обработка возврат",
+        "обработка отмен",
+        "обработка невыкуп",
+        "логистик",
+        "кросс-док", "кроссдок",
+        "обработка товара",
+        "временное размещение", "размещение товара",
+    ]
+
+    is_logistics_service = _s.apply(lambda x: any(k in x for k in logistics_keywords))
+    is_acquiring = _code.str.contains("acquiring", na=False) | _s.str.contains("эквайринг", na=False)
+
+    s_amount = pd.to_numeric(sku_df.get("amount", 0), errors="coerce").fillna(0.0)
+    s_extra = s_amount.where(is_logistics_service & ~is_acquiring, 0.0)
+
+    # НЕТТО логистика/услуги (со знаком как в API), затем расход (+)
+    sku_df["services_cost"] = -(s_services + s_delivery + s_return_delivery + s_extra)
     # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
     sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
 
@@ -2182,7 +2200,7 @@ sku_df["logistics_services_cost"] = (
             gross_sales=("accruals_for_sale", "sum"),
             amount_net=("amount", "sum"),
             commission=("commission_cost", "sum"),
-            logistics=("logistics_services_cost", "sum"),
+            logistics=("services_cost", "sum"),
             acquiring_amount=("acquiring_amount", "sum"),
             bonus_points=("bonus_amt", "sum"),
             partner_programs=("partner_amt", "sum"),
