@@ -2114,50 +2114,27 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df = sku_df.dropna(subset=["sku"]).copy()
     sku_df["sku"] = sku_df["sku"].astype(int)
 
-    # расходы (в API обычно минусом)
-    # Комиссия OZON (расход): берём sale_commission из finance API (обычно приходит минусом),
-    # приводим к расходу простым сменой знака БЕЗ clip() — чтобы учесть корректировки/сторно.
-    sku_df["commission"] = -pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
+    # расходы (в API обычно минусом / иногда со сторно) — считаем ОДНИМ способом, без clip()
+# Комиссия (вознаграждение Ozon): в API обычно отрицательная → переводим в "расход" (плюс)
+sku_df["commission_cost"] = -pd.to_numeric(sku_df.get("sale_commission", 0.0), errors="coerce").fillna(0.0)
 
-    # Услуги/логистика (расход): services_sum обычно приходит минусом, приводим к расходу сменой знака (без clip()).
-    sku_df["_service_cost"] = -pd.to_numeric(sku_df.get("services_sum", 0), errors="coerce").fillna(0.0)
+# Логистика и услуги (как в ЛК): берём ВСЕ логистические начисления из finance-операций:
+# - services_sum (в ops_to_df это уже "services_other" без эквайринга/баллов/партнёров/ads_order)
+# - delivery_charge
+# - return_delivery_charge
+def _as_cost(v):
+    v = float(v or 0.0)
+    return (-v) if v < 0 else v
 
-    # Разбивка услуг на подкатегории (приближенно к ЛК). Если нужно — подстроим по твоим точным названиям.
-    sname = sku_df.get("type_name", "").astype(str).str.lower()
-    sku_df["logistics_main"] = sku_df["_service_cost"].where(
-        sname.str.contains("доставка покупателю|кросс-док|магистраль|последняя миля|drop-off|pick-up", regex=True),
-        0.0,
-    )
-    sku_df["logistics_return"] = sku_df["_service_cost"].where(
-        sname.str.contains("возврат|невыкуп|отмена|обратн", regex=True),
-        0.0,
-    )
-    sku_df["shipment_processing"] = sku_df["_service_cost"].where(
-        sname.str.contains("обработка отправ", regex=True),
-        0.0,
-    )
-    sku_df["return_processing"] = sku_df["_service_cost"].where(
-        sname.str.contains("обработка возв", regex=True),
-        0.0,
-    )
-    sku_df["last_mile"] = sku_df["_service_cost"].where(
-        sname.str.contains("последняя миля", regex=True),
-        0.0,
-    )
+sku_df["_services_cost_raw"] = pd.to_numeric(sku_df.get("services_sum", 0.0), errors="coerce").fillna(0.0)
+sku_df["_delivery_raw"] = pd.to_numeric(sku_df.get("delivery_charge", 0.0), errors="coerce").fillna(0.0)
+sku_df["_return_delivery_raw"] = pd.to_numeric(sku_df.get("return_delivery_charge", 0.0), errors="coerce").fillna(0.0)
 
-    # Прочие услуги (остаток, чтобы сумма сходилась)
-    sku_df["services_other"] = (
-        sku_df["_service_cost"]
-        - sku_df["logistics_main"]
-        - sku_df["logistics_return"]
-        - sku_df["shipment_processing"]
-        - sku_df["return_processing"]
-        - sku_df["last_mile"]
-    )
-
-    # Итоговая "logistics" (для совместимости с остальным кодом) = сумма всех услуг/логистики
-    sku_df["logistics"] = sku_df["_service_cost"]
-
+sku_df["logistics_services_cost"] = (
+    sku_df["_services_cost_raw"].apply(_as_cost)
+    + sku_df["_delivery_raw"].apply(_as_cost)
+    + sku_df["_return_delivery_raw"].apply(_as_cost)
+)
     # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
     sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
 
@@ -2204,14 +2181,8 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
             qty_returns=("qty_returns", "sum"),
             gross_sales=("accruals_for_sale", "sum"),
             amount_net=("amount", "sum"),
-            commission=("commission", "sum"),
-            logistics=("logistics", "sum"),
-            logistics_main=("logistics_main", "sum"),
-            logistics_return=("logistics_return", "sum"),
-            last_mile=("last_mile", "sum"),
-            shipment_processing=("shipment_processing", "sum"),
-            return_processing=("return_processing", "sum"),
-            services_other=("services_other", "sum"),
+            commission=("commission_cost", "sum"),
+            logistics=("logistics_services_cost", "sum"),
             acquiring_amount=("acquiring_amount", "sum"),
             bonus_points=("bonus_amt", "sum"),
             partner_programs=("partner_amt", "sum"),
