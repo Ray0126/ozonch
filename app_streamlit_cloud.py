@@ -2101,6 +2101,100 @@ def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd
     return out
 
 
+
+# ================== LK REPORT (Отчет по товарам / Начисления) ==================
+# Нужен только чтобы получить "логистика и услуги" в точности как в ЛК:
+# Сборка заказа, Обработка отправления, Магистраль, Последняя миля, Обратная магистраль,
+# Обработка возврата, Обработка отмененного/невостребованного, Обработка невыкупленного,
+# Логистика, Обратная логистика.
+#
+# ВАЖНО: lk_report_by_offer_cli(1).py НЕ "вычисляет" эти колонки — он просто суммирует их из Excel ЛК.
+# Поэтому для совпадения 1-в-1 этот Excel должен быть доступен приложению (в data/ или через LK_REPORT_PATH).
+#
+LK_REPORT_PATH = os.getenv("LK_REPORT_PATH", "").strip()
+
+_LK_COL_PREFIXES = [
+    "Сборка заказа",
+    "Обработка отправления",
+    "Магистраль",
+    "Последняя миля",
+    "Обратная магистраль",
+    "Обработка возврата",
+    "Обработка отмененного",
+    "Обработка невыкупленного товара",
+    "Логистика",
+    "Обратная логистика",
+]
+
+def _find_lk_report_path() -> str:
+    """Ищем xlsx отчёт ЛК в data/ если не задан LK_REPORT_PATH."""
+    if LK_REPORT_PATH and os.path.exists(LK_REPORT_PATH):
+        return LK_REPORT_PATH
+    # auto-discover in DATA_DIR
+    try:
+        if os.path.isdir(DATA_DIR):
+            cands = []
+            for fn in os.listdir(DATA_DIR):
+                if not fn.lower().endswith(".xlsx"):
+                    continue
+                low = fn.lower()
+                if ("отчет по товарам" in low) or ("отчёт по товарам" in low):
+                    cands.append(os.path.join(DATA_DIR, fn))
+            # берём самый "свежий" по mtime
+            if cands:
+                cands.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+                return cands[0]
+    except Exception:
+        pass
+    return ""
+
+def _normalize_article_for_lk(a: str) -> str:
+    a = str(a or "").strip()
+    # "Дубль (ART)" -> "ART"
+    m = re.match(r"^Дубль\s*\((.+)\)\s*$", a)
+    if m:
+        return m.group(1).strip()
+    return a
+
+@st.cache_data(ttl=3600)
+def load_lk_logistics_by_article() -> dict:
+    """Возвращает dict {Артикул: логистика+услуги} из Excel ЛК (лист 'Начисления')."""
+    p = _find_lk_report_path()
+    if not p:
+        return {}
+
+    try:
+        df = pd.read_excel(p, sheet_name="Начисления")
+    except Exception:
+        return {}
+
+    if "Артикул" not in df.columns:
+        return {}
+
+    art = df["Артикул"].astype(str)
+    is_art = art.notna() & (art.str.strip() != "") & (art.str.lower() != "nan")
+    df = df[is_art].copy()
+    df["Артикул"] = df["Артикул"].astype(str).str.strip()
+
+    # найдём реальные названия колонок по префиксам (в ЛК они длинные, с пояснениями в скобках)
+    lk_cols = []
+    for pref in _LK_COL_PREFIXES:
+        matches = [c for c in df.columns if isinstance(c, str) and c.strip().startswith(pref)]
+        if matches:
+            lk_cols.append(matches[0])
+
+    if not lk_cols:
+        return {}
+
+    for c in lk_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    g = df.groupby("Артикул", as_index=False)[lk_cols].sum()
+    g["lk_logistics_services"] = g[lk_cols].sum(axis=1)
+
+    return dict(zip(g["Артикул"].astype(str), g["lk_logistics_services"].astype(float)))
+
+
 # ================== SOLD SKU TABLE ==================
 def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
     # Эквайринг: распределяем acquiring_amount по SKU на уровне posting_number (до фильтрации sku)
@@ -2115,44 +2209,8 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["sku"] = sku_df["sku"].astype(int)
 
     # расходы (в API обычно минусом)
-    # Комиссия: берём НЕТТО со знаком (учитываем корректировки/сторно), затем переводим в расход (+)
-    sku_df["commission_cost"] = -pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
-
-    # Логистика и услуги: собираем НЕТТО из всех "логистических" начислений (по логике ЛК-отчёта),
-    # затем переводим в расход (+). Эквайринг сюда НЕ включаем (он считается отдельной логикой ниже).
-    s_services = pd.to_numeric(sku_df.get("services_sum", 0), errors="coerce").fillna(0.0)
-    s_delivery = pd.to_numeric(sku_df["delivery_charge"], errors="coerce").fillna(0.0) if "delivery_charge" in sku_df.columns else pd.Series(0.0, index=sku_df.index)
-    s_return_delivery = pd.to_numeric(sku_df["return_delivery_charge"], errors="coerce").fillna(0.0) if "return_delivery_charge" in sku_df.columns else pd.Series(0.0, index=sku_df.index)
-
-    # Доп. логистические услуги, которые могут приходить отдельными операциями без services_sum:
-    # ориентируемся на названия из ЛК (сборка/обработка/магистраль/последняя миля/логистика).
-    _name = sku_df.get("type_name", "").astype(str).str.lower()
-    _code = sku_df.get("operation_type", "").astype(str).str.lower()
-    _s = (_name + " " + _code)
-
-    logistics_keywords = [
-        "сборк",
-        "обработка отправ",
-        "drop-off", "dropoff", "pick-up", "pickup",
-        "магистраль",
-        "последняя миля",
-        "обработка возврат",
-        "обработка отмен",
-        "обработка невыкуп",
-        "логистик",
-        "кросс-док", "кроссдок",
-        "обработка товара",
-        "временное размещение", "размещение товара",
-    ]
-
-    is_logistics_service = _s.apply(lambda x: any(k in x for k in logistics_keywords))
-    is_acquiring = _code.str.contains("acquiring", na=False) | _s.str.contains("эквайринг", na=False)
-
-    s_amount = pd.to_numeric(sku_df.get("amount", 0), errors="coerce").fillna(0.0)
-    s_extra = s_amount.where(is_logistics_service & ~is_acquiring, 0.0)
-
-    # НЕТТО логистика/услуги (со знаком как в API), затем расход (+)
-    sku_df["services_cost"] = -(s_services + s_delivery + s_return_delivery + s_extra)
+    sku_df["commission_cost"] = (-pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
+    sku_df["services_cost"] = (-pd.to_numeric(sku_df.get("services_sum", 0), errors="coerce").fillna(0.0)).clip(lower=0.0)
     # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
     sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
 
@@ -2260,6 +2318,30 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     g["article"] = g["article"].fillna("").astype(str)
 
     g["cogs_total"] = (g["qty_buyout"].clip(lower=0.0) * g["cogs_unit"]).fillna(0.0)
+
+    
+    # ================== LOGISTICS/SERVICES AS IN LK ==================
+    # Берём сумму "Сборка заказа ... Обратная логистика" из отчёта ЛК (лист 'Начисления')
+    # и подставляем в колонку logistics. Эквайринг остаётся как есть.
+    lk_map = load_lk_logistics_by_article()
+    if lk_map and "article" in g.columns:
+        g["_article_norm"] = g["article"].map(_normalize_article_for_lk)
+        g["_lk_total"] = g["_article_norm"].map(lk_map).fillna(0.0)
+
+        # Чтобы не было двойного учёта при нескольких SKU на один Артикул:
+        grp = g.groupby("_article_norm", dropna=False)
+        denom = grp["accruals_net"].transform("sum") if "accruals_net" in g.columns else 0.0
+        n = grp["sku"].transform("count")
+        denom = pd.to_numeric(denom, errors="coerce").fillna(0.0)
+
+        share = (g["accruals_net"] / denom.replace({0.0: pd.NA})) if "accruals_net" in g.columns else pd.Series(0.0, index=g.index)
+        share = share.fillna(1.0 / n.replace({0: 1}))
+        g["logistics"] = (g["_lk_total"] * share).fillna(0.0)
+
+        g = g.drop(columns=[c for c in ["_article_norm", "_lk_total"] if c in g.columns])
+    else:
+        # Если отчёта ЛК нет, старые расчёты services_sum не используем (они не совпадают с ЛК)
+        g["logistics"] = 0.0
 
     g = g.sort_values("accruals_net", ascending=False)
     return g
