@@ -27,64 +27,6 @@ def _parse_ru_money(x) -> float:
     except Exception:
         return 0.0
 
-# ================== LK "Отчет по товарам" (лист: Начисления) → агрегат по Артикулу ==================
-def _norm_col(s: str) -> str:
-    return str(s or "").strip().lower()
-
-def _find_lk_sheet(xls: pd.ExcelFile) -> str:
-    for n in xls.sheet_names:
-        if _norm_col(n) == "начисления":
-            return n
-    return xls.sheet_names[0]
-
-def load_lk_by_article_from_excel(xlsx_path: str) -> pd.DataFrame:
-    """Возвращает DataFrame: article (Артикул) + колонки ЛК (суммы за период).
-    Читает отчет 'Отчет по товарам...' (лист 'Начисления'). Если файла нет — вернет пустой DF.
-    """
-    try:
-        if not xlsx_path or not os.path.exists(xlsx_path):
-            return pd.DataFrame()
-        xls = pd.ExcelFile(xlsx_path)
-        sheet = _find_lk_sheet(xls)
-        df = pd.read_excel(xlsx_path, sheet_name=sheet)
-    except Exception:
-        return pd.DataFrame()
-
-    # найдем колонку артикула
-    art_col = None
-    for c in df.columns:
-        lc = _norm_col(c)
-        if lc in ("артикул", "offer_id", "offer id", "offerid", "артикул продавца"):
-            art_col = c
-            break
-        if "артикул" in lc:
-            art_col = c
-    if art_col is None:
-        return pd.DataFrame()
-
-    # числовые колонки (попробуем конвертнуть)
-    num_cols = []
-    for c in df.columns:
-        if c == art_col:
-            continue
-        s = pd.to_numeric(df[c], errors="coerce")
-        if s.notna().any():
-            df[c] = s.fillna(0.0)
-            num_cols.append(c)
-
-    if not num_cols:
-        return pd.DataFrame()
-
-    df_art = df[df[art_col].notna() & (df[art_col].astype(str).str.strip() != "")].copy()
-    if df_art.empty:
-        return pd.DataFrame()
-
-    g = df_art.groupby(art_col, as_index=False)[num_cols].sum()
-    g = g.rename(columns={art_col: "article"})
-    g["article"] = g["article"].astype(str).str.strip()
-    return g
-
-
 @st.cache_data(ttl=60*30, show_spinner=False)
 def load_perf_spend_click_by_sku(date_from: str, date_to: str) -> dict:
     """Возвращает {sku:int -> spend_click(float)} из отчёта Performance products (JSON).
@@ -2160,7 +2102,7 @@ def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd
 
 
 # ================== SOLD SKU TABLE ==================
-def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame, lk_by_article: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
     # Эквайринг: распределяем acquiring_amount по SKU на уровне posting_number (до фильтрации sku)
     df_ops = allocate_acquiring_amount_by_posting(df_ops)
 
@@ -2173,8 +2115,32 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame, lk_b
     sku_df["sku"] = sku_df["sku"].astype(int)
 
     # расходы (в API обычно минусом)
-    sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
-    sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
+    # ВАЖНО: НЕ clip() — в ЛК встречаются сторно/корректировки (плюсовые значения),
+    # их нельзя обрезать, иначе "комиссия/услуги" будут считаться по-старому и расходиться.
+    sku_df["commission_cost"] = -pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
+    sku_df["services_cost"]   = -pd.to_numeric(sku_df.get("services_sum", 0),   errors="coerce").fillna(0.0)
+
+    # Разбивка услуг/логистики по "ЛК-похожим" корзинам (по названию операции).
+    # Это НЕ влияет на эквайринг (он считается отдельно и остается как есть).
+    tname = sku_df.get("type_name", "").astype(str).str.lower()
+    ocode = sku_df.get("operation_type", "").astype(str).str.lower()
+    s = (tname + " " + ocode)
+
+    is_last_mile = s.str.contains("доставка покупателю|последняя миля")
+    is_ship_proc = s.str.contains("обработка отправления|drop-off|pick-up")
+    is_return_proc = s.str.contains("обработка возврата|доставка и обработка возврата")
+    is_return_log = s.str.contains("получение возврата|обратн") | (s.str.contains("невыкуп|отмена") & s.str.contains("достав"))
+    # "Логистика" — все, что похоже на доставку/магистраль/кроссдок/СЦ/ПВЗ, кроме выделенных выше
+    is_log_main = s.str.contains("достав|магистраль|кросс|сц/пвз|сц|пвз") & ~(is_last_mile | is_ship_proc | is_return_proc | is_return_log)
+
+    sku_df["svc_last_mile"] = sku_df["services_cost"].where(is_last_mile, 0.0)
+    sku_df["svc_ship_proc"] = sku_df["services_cost"].where(is_ship_proc, 0.0)
+    sku_df["svc_return_proc"] = sku_df["services_cost"].where(is_return_proc, 0.0)
+    sku_df["svc_return_log"] = sku_df["services_cost"].where(is_return_log, 0.0)
+    sku_df["svc_logistics"] = sku_df["services_cost"].where(is_log_main, 0.0)
+
+    used = (sku_df["svc_last_mile"] + sku_df["svc_ship_proc"] + sku_df["svc_return_proc"] + sku_df["svc_return_log"] + sku_df["svc_logistics"])
+    sku_df["svc_other"] = sku_df["services_cost"] - used
     # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
     sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
 
@@ -2223,6 +2189,12 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame, lk_b
             amount_net=("amount", "sum"),
             commission=("commission_cost", "sum"),
             logistics=("services_cost", "sum"),
+            logistics_main=("svc_logistics", "sum"),
+            logistics_return=("svc_return_log", "sum"),
+            last_mile=("svc_last_mile", "sum"),
+            shipment_processing=("svc_ship_proc", "sum"),
+            return_processing=("svc_return_proc", "sum"),
+            services_other=("svc_other", "sum"),
             acquiring_amount=("acquiring_amount", "sum"),
             bonus_points=("bonus_amt", "sum"),
             partner_programs=("partner_amt", "sum"),
@@ -2242,17 +2214,6 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame, lk_b
     g["accruals_net"] = g["gross_sales"] + g["bonus_points"] + g["partner_programs"]
 
     g["sale_costs"] = g["commission"] + g["logistics"] + g["acquiring"]
-
-    # --- LK override (комиссия/логистика) по Артикулу, если дан lk_by_article ---
-    g["commission_finance"] = g["commission"]
-    g["logistics_finance"] = g["logistics"]
-    # разбиение логистики (по умолчанию 0)
-    g["logistics_main"] = 0.0
-    g["logistics_return"] = 0.0
-    g["last_mile"] = 0.0
-    g["shipment_processing"] = 0.0
-    g["return_processing"] = 0.0
-    g["services_other"] = 0.0
 
     # COGS
     if cogs_df_local is None or cogs_df_local.empty:
@@ -2293,89 +2254,6 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame, lk_b
     g["article"] = g["article"].fillna("").astype(str)
 
     g["cogs_total"] = (g["qty_buyout"].clip(lower=0.0) * g["cogs_unit"]).fillna(0.0)
-
-    # Применяем ЛК-цифры (комиссия и логистика) по Артикулу, если передан lk_by_article
-    try:
-        if lk_by_article is not None and isinstance(lk_by_article, pd.DataFrame) and not lk_by_article.empty:
-            lk = lk_by_article.copy()
-            lk["article"] = lk["article"].astype(str).str.strip()
-            g["article"] = g["article"].astype(str).str.strip()
-
-            # найдём нужные колонки по частичным совпадениям (в разных выгрузках названия могут чуть отличаться)
-            def _pick_col(cols, must_contain: list[str]):
-                for c in cols:
-                    lc = _norm_col(c)
-                    ok = True
-                    for m in must_contain:
-                        if m not in lc:
-                            ok = False
-                            break
-                    if ok:
-                        return c
-                return None
-
-            cols = list(lk.columns)
-            col_revenue = _pick_col(cols, ["за продажу", "до вычета"])
-            col_comm = _pick_col(cols, ["вознаграждение", "ozon"])
-            col_log = _pick_col(cols, ["логистика"])  # может совпасть и с "обратная логистика" — проверим ниже
-            col_log_ret = _pick_col(cols, ["обратная", "логистика"])
-            col_last_mile = _pick_col(cols, ["последняя", "миля"])
-            col_ship_proc = _pick_col(cols, ["обработка", "отправ"])
-            col_return_proc = _pick_col(cols, ["обработка", "возврата"])
-
-            # если col_log попал на "обратная логистика", то отдадим приоритет обычной логистике
-            if col_log is not None and "обратная" in _norm_col(col_log):
-                col_log = _pick_col(cols, ["логистика"])  # повторно, но ниже уточним
-                # найдём "логистика" без "обратная"
-                for c in cols:
-                    lc = _norm_col(c)
-                    if "логистика" in lc and "обратная" not in lc:
-                        col_log = c
-                        break
-
-            lk_keep = ["article"]
-            for c in [col_revenue, col_comm, col_log, col_log_ret, col_last_mile, col_ship_proc, col_return_proc]:
-                if c and c not in lk_keep:
-                    lk_keep.append(c)
-
-            lk2 = lk[lk_keep].copy()
-            lk2 = lk2.drop_duplicates(subset=["article"])
-
-            g = g.merge(lk2, on="article", how="left", suffixes=("", "_lkraw"))
-
-            # Комиссия: в ЛК она уже со знаком минус, в нашей таблице хотим расход ПЛЮСОМ
-            if col_comm and col_comm in g.columns:
-                g["commission"] = (-pd.to_numeric(g[col_comm], errors="coerce").fillna(0.0)).clip(lower=0.0)
-
-            # Логистика и разбиение (в ЛК обычно тоже минусом)
-            def _lk_cost(colname: str) -> pd.Series:
-                return (-pd.to_numeric(g.get(colname, 0.0), errors="coerce").fillna(0.0)).clip(lower=0.0)
-
-            if col_log:
-                g["logistics_main"] = _lk_cost(col_log)
-            if col_log_ret:
-                g["logistics_return"] = _lk_cost(col_log_ret)
-            if col_last_mile:
-                g["last_mile"] = _lk_cost(col_last_mile)
-            if col_ship_proc:
-                g["shipment_processing"] = _lk_cost(col_ship_proc)
-            if col_return_proc:
-                g["return_processing"] = _lk_cost(col_return_proc)
-
-            # Совместимость: logistics = сумма логистических компонент
-            g["logistics"] = (
-                g["logistics_main"]
-                + g["logistics_return"]
-                + g["last_mile"]
-                + g["shipment_processing"]
-                + g["return_processing"]
-                + g.get("services_other", 0.0)
-            )
-
-            # пересчитаем sale_costs (эквайринг не трогаем)
-            g["sale_costs"] = g["commission"] + g["logistics"] + g["acquiring"]
-    except Exception:
-        pass
 
     g = g.sort_values("accruals_net", ascending=False)
     return g
@@ -2627,8 +2505,7 @@ with tab1:
         df_ops_prev = ops_to_df(ops_prev)
         df_ops_prev = redistribute_ops_without_items(df_ops_prev)  # ✅ ДОБАВИТЬ
 
-    lk_by_article = load_lk_by_article_from_excel(os.path.join(DATA_DIR, 'lk_report.xlsx'))
-    sold = build_sold_sku_table(df_ops, cogs_df, lk_by_article=lk_by_article)
+    sold = build_sold_sku_table(df_ops, cogs_df)
 
     # --- DEBUG: разрез операций по одному SKU (помогает найти расхождения с ЛК)
     debug_sku = st.sidebar.text_input(
@@ -2872,12 +2749,6 @@ with tab1:
             "accruals_net": "Выручка, ₽",
             "commission": "Комиссия, ₽",
             "logistics": "Услуги/логистика, ₽",
-            "logistics_main": "Логистика, ₽",
-            "logistics_return": "Обратная логистика, ₽",
-            "last_mile": "Последняя миля, ₽",
-            "shipment_processing": "Обработка отправления, ₽",
-            "return_processing": "Обработка возврата, ₽",
-            "services_other": "Прочие услуги, ₽",
             "acquiring": "Эквайринг, ₽",
             "sale_costs": "Расходы Ozon, ₽",
             "ads_total": "Реклама (клик), ₽",
