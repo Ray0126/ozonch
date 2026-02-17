@@ -2115,10 +2115,31 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["sku"] = sku_df["sku"].astype(int)
 
     # расходы (в API обычно минусом)
-    sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
-    sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
+    # Комиссия OZON: считаем НЕТТО (без clip), чтобы корректировки/сторно не терялись
+    sku_df["commission_cost"] = -pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
+
+    # Услуги/логистика: заменяем старую "services_sum" на единую НЕТТО-логику в сторону ЛК
+    # База: services_sum (обычно уже содержит часть услуг в строках продаж/возвратов)
+    base_services = -pd.to_numeric(sku_df.get("services_sum", 0), errors="coerce").fillna(0.0)
+
+    # Плюс: отдельные сервисные операции (по type_name), которые в ЛК отражаются как логистика/услуги
+    LK_SERVICE_NAMES = {'Сборка заказа', 'Обработка отправления (Drop-off/Pick-up)', 'Магистраль', 'Последняя миля', 'Обратная магистраль', 'Обработка возврата', 'Обработка отмененного или невостребованного товара', 'Обработка невыкупленного товара', 'Логистика', 'Обратная логистика'}
+    type_name = sku_df.get("type_name", "").astype(str).str.strip()
+    is_lk_service = type_name.isin(LK_SERVICE_NAMES)
+
+    # Чтобы не задвоить продажи: добавляем amount только у "чистых" сервисных строк (без выручки/комиссии)
+    accr = pd.to_numeric(sku_df.get("accruals_for_sale", 0), errors="coerce").fillna(0.0)
+    comm = pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
+    pure_service = is_lk_service & (accr.abs() < 1e-9) & (comm.abs() < 1e-9)
+
+    extra_services = -pd.to_numeric(sku_df.get("amount", 0), errors="coerce").fillna(0.0)
+    sku_df["services_cost"] = base_services + extra_services.where(pure_service, 0.0)
+
     # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
-    sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
+    if "acquiring_amount_alloc" in sku_df.columns:
+        sku_df["acquiring_amount"] = pd.to_numeric(sku_df["acquiring_amount_alloc"], errors="coerce").fillna(0.0)
+    else:
+        sku_df["acquiring_amount"] = 0.0
 
     # “Баллы за скидки” и “Программы партнёров” (в ЛК идут ПЛЮСОМ к выручке)
     sku_df["bonus_amt"] = pd.to_numeric(sku_df.get("bonus_points", 0), errors="coerce").fillna(0.0)
@@ -2227,91 +2248,6 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
 
     g = g.sort_values("accruals_net", ascending=False)
     return g
-
-# ================== LK REPORT (ITEMS) HELPERS ==================
-LK_LOGI_SERVICE_COLS = [
-    "Сборка заказа",
-    "Обработка отправления (Drop-off/Pick-up)",
-    "Магистраль",
-    "Последняя миля",
-    "Обратная магистраль",
-    "Обработка возврата",
-    "Обработка отмененного или невостребованного товара",
-    "Обработка невыкупленного товара",
-    "Логистика",
-    "Обратная логистика",
-]
-
-def _norm_col(s: str) -> str:
-    return str(s or "").strip().lower()
-
-def _find_lk_sheet(xls: pd.ExcelFile) -> str:
-    # В большинстве отчетов это лист "Начисления"
-    for n in xls.sheet_names:
-        if _norm_col(n) == _norm_col("Начисления"):
-            return n
-    return xls.sheet_names[0]
-
-def parse_lk_items_report(file_like) -> pd.DataFrame:
-    """Парсит отчет ЛК 'Отчет по товарам' (лист Начисления) и возвращает:
-    offer_id(Артикул) + lk_logi_services (сумма 10 колонок как в ЛК) + сами 10 колонок (для отображения/проверки).
-    """
-    xls = pd.ExcelFile(file_like)
-    sheet = _find_lk_sheet(xls)
-    df = pd.read_excel(file_like, sheet_name=sheet)
-
-    # колонка артикула
-    art_col = None
-    for c in df.columns:
-        if _norm_col(c) in ("артикул", "offer_id", "offer id", "offerid", "артикул продавца"):
-            art_col = c
-            break
-    if art_col is None:
-        # fallback: любая колонка содержащая "артикул"
-        for c in df.columns:
-            if "артикул" in _norm_col(c):
-                art_col = c
-                break
-    if art_col is None:
-        raise RuntimeError("Не нашел колонку 'Артикул' в отчете ЛК (лист: %s)" % sheet)
-
-    # числовые колонки ЛК (10 шт)
-    present_cols = []
-    for col in LK_LOGI_SERVICE_COLS:
-        # иногда в шапке двойные пробелы/разные пробелы — матчим по нормализованному
-        found = None
-        for c in df.columns:
-            if _norm_col(c) == _norm_col(col):
-                found = c
-                break
-        if found is not None:
-            present_cols.append((col, found))
-
-    if not present_cols:
-        raise RuntimeError("В отчете ЛК не нашел ни одной из колонок логистики/услуг. Проверь, что это 'Отчет по товарам' и лист 'Начисления'.")
-
-    out = df[[art_col] + [src for _, src in present_cols]].copy()
-    out = out.rename(columns={art_col: "offer_id", **{src: canon for canon, src in present_cols}})
-
-    # привести к числам
-    for canon, _src in present_cols:
-        out[canon] = pd.to_numeric(out[canon], errors="coerce").fillna(0.0)
-
-    out = out[out["offer_id"].notna() & (out["offer_id"].astype(str).str.strip() != "")]
-    out["offer_id"] = out["offer_id"].astype(str).str.strip()
-
-    # агрегация по артикулу
-    grp = out.groupby("offer_id", as_index=False)[[canon for canon, _ in present_cols]].sum()
-
-    # сумма логистики и услуг как ты просишь (один столбец)
-    grp["lk_logi_services"] = grp[[canon for canon, _ in present_cols]].sum(axis=1)
-
-    # гарантируем наличие всех 10 колонок (чтобы UI был стабильный)
-    for c in LK_LOGI_SERVICE_COLS:
-        if c not in grp.columns:
-            grp[c] = 0.0
-
-    return grp[["offer_id", "lk_logi_services"] + LK_LOGI_SERVICE_COLS]
 
 
 def allocate_tax_by_share(sku_table: pd.DataFrame, total_tax: float) -> pd.DataFrame:
@@ -2745,35 +2681,6 @@ with tab1:
     if sold is None or sold.empty:
         st.warning("За выбранный период нет SKU-операций (items[].sku).")
     else:
-        # ---- ЛК-логистика по артикулам (как в lk_report_by_offer_cli) ----
-        with st.expander("ЛК: логистика и услуги по артикулам (как в отчете 'Отчет по товарам' → лист 'Начисления')", expanded=False):
-            st.caption("Загрузи Excel-отчет из ЛК за ТОТ ЖЕ период. Мы возьмем 10 колонок (Сборка/Последняя миля/Логистика/Обратная логистика и т.д.) и сложим их в один столбец 'Логистика и услуги' по каждому Артикулу.")
-            lk_file = st.file_uploader(
-                "Файл отчета из ЛК (xlsx)",
-                type=["xlsx"],
-                key="lk_items_report_uploader",
-            )
-            if lk_file is not None:
-                try:
-                    lk_map_df = parse_lk_items_report(lk_file)
-                    st.session_state["lk_map_df_cached"] = lk_map_df
-                    st.success(f"Ок. Строк (артикулов): {len(lk_map_df)}")
-                    st.dataframe(lk_map_df.head(100), use_container_width=True, hide_index=True)
-                    st.write("Итого по ЛК-логистике и услугам (сумма по всем артикулам):", money(float(lk_map_df['lk_logi_services'].sum())))
-                except Exception as e:
-                    st.error(f"Не смог разобрать отчет ЛК: {e}")
-
-        # Если ЛК-файл загружен — ПОЛНОСТЬЮ заменяем 'logistics' на сумму 10 колонок из ЛК (по Артикулу)
-        lk_map_df = st.session_state.get("lk_map_df_cached", None)
-        if lk_map_df is not None and not lk_map_df.empty:
-            offer_to_lk = dict(zip(lk_map_df["offer_id"].astype(str), lk_map_df["lk_logi_services"].astype(float)))
-            art = sold.get("article", "").astype(str).str.strip()
-            mapped = art.map(offer_to_lk)
-            unmapped = int(mapped.isna().sum())
-            if unmapped:
-                st.warning(f"ЛК-логистика не примапилась к {unmapped} строкам (нет/не совпал Артикул в sold-таблице). Для них поставил 0. Проверь колонку 'article' (Артикул) в себестоимости/связке SKU→Артикул.")
-            sold["logistics"] = mapped.fillna(0.0)
-
         total_tax = float(sold["accruals_net"].sum()) * 0.06
 
         # распределяем: налог, реклама, опер. расходы
