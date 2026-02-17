@@ -276,7 +276,7 @@ def _perf_products_report_debug(date_from: str, date_to: str) -> dict:
     info["error"] = "report timeout"
     return info
 
-def allocate_acquiring_cost_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
+def allocate_acquiring_amount_by_posting(df_ops: pd.DataFrame) -> pd.DataFrame:
     """Эквайринг по SKU за период (как в ЛК).
     Ищем finance-операции с operation_type_name/type_name = 'Оплата эквайринга' (или содержит 'эквайринг').
     Считаем NET по amount (учитываем сторно/плюсовые строки): расход = max(-sum(amount), 0).
@@ -1544,26 +1544,19 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
 
         items = op.get("items") or []
         services = op.get("services") or []        # --- услуги: общий + разрез на "баллы/партнерки/прочее"
-        services_total = 0.0
+        services_other = 0.0
         bonus_sum = 0.0
         partner_sum = 0.0
-        
+
         acquiring_services_sum = 0.0
         ads_order_sum = 0.0
 
         for s in services:
-            sname = (s.get("name") or s.get("service_name") or s.get("title") or "").lower()
-
-            # ❌ эквайринг не должен попадать в services
-            if "эквайринг" in sname or "acquiring" in sname:
-                continue
-
-            price = _to_float(s.get("price", 0))
-            services_total += price
-            sname = s.get("name") or s.get("service_name") or s.get("title") or ""
+            sname = (s.get("name") or s.get("service_name") or s.get("title") or "")
             sname_l = str(sname).lower()
+            price = _to_float(s.get("price", 0))
 
-            # Эквайринг берём из services (как в ЛК), но исключаем из services_sum
+            # Эквайринг: складываем отдельно и НЕ включаем в services_other
             if ("эквайринг" in sname_l) or ("acquiring" in sname_l):
                 acquiring_services_sum += price
                 continue
@@ -1576,8 +1569,10 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
             elif b == "ads_order":
                 # ВАЖНО: временно исключаем из расходов Ozon (отдельно пока не выводим)
                 ads_order_sum += price
+            else:
+                services_other += price
 
-        services_other = services_total - bonus_sum - partner_sum - ads_order_sum
+
         base = {
             "operation_id": op_id,
             "operation_date": op_date,
@@ -1633,6 +1628,17 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
     for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "bonus_points", "partner_programs", "amount", "qty"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
+
+    # Убираем точные дубликаты операций (иногда API/склейка страниц даёт повторяющиеся строки)
+    dedupe_cols = [c for c in [
+        "operation_id", "operation_date", "operation_type", "type", "type_name",
+        "posting_number", "delivery_schema", "sku", "qty",
+        "accruals_for_sale", "sale_commission", "services_sum",
+        "acquiring_amount", "acquiring_service", "bonus_points", "partner_programs", "amount"
+    ] if c in df.columns]
+    if dedupe_cols:
+        df = df.drop_duplicates(subset=dedupe_cols, keep="first").reset_index(drop=True)
+
     return df
 
 
@@ -1705,7 +1711,7 @@ def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
                 newr["qty"] = float(wr["w_qty"])
 
             # суммы распределяем по весу
-            for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "bonus_points", "partner_programs", "amount"]:
+            for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "acquiring_amount", "acquiring_cost", "bonus_points", "partner_programs", "amount"]:
                 newr[c] = _to_float(newr.get(c, 0)) * k
 
             out_rows.append(pd.DataFrame([newr]))
@@ -1713,7 +1719,7 @@ def redistribute_ops_without_items(df_ops: pd.DataFrame) -> pd.DataFrame:
     out = pd.concat(out_rows, ignore_index=True)
 
     # финальная чистка типов
-    for c in ["accruals_for_sale", "sale_commission", "services_sum", "bonus_points", "partner_programs", "amount", "qty"]:
+    for c in ["accruals_for_sale", "sale_commission", "services_sum", "acquiring_service", "acquiring_amount", "acquiring_cost", "bonus_points", "partner_programs", "amount", "qty"]:
         if c in out.columns:
             out[c] = pd.to_numeric(out[c], errors="coerce").fillna(0.0)
 
@@ -2485,8 +2491,20 @@ with tab1:
     # ================== DEBUG: РАЗБОР УСЛУГ (services) ИЗ СЫРЫХ ОПЕРАЦИЙ ==================
     df_ops = ops_to_df(ops_now)
     # Эквайринг: распределяем по SKU на полном df_ops (по posting_number)
-    df_ops = allocate_acquiring_cost_by_posting(df_ops)
+    df_ops = allocate_acquiring_amount_by_posting(df_ops)
     df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
+
+    # DEBUG: показываем "не только эквайринг" (head(1) часто попадает на acquiring-операции)
+    with st.expander("DEBUG df_ops (сырые операции)", expanded=False):
+        st.write({"rows": len(df_ops), "unique_operation_id": int(df_ops["operation_id"].nunique()) if "operation_id" in df_ops.columns else None})
+        if "operation_type" in df_ops.columns:
+            st.write("FIRST non-acquiring rows:")
+            st.write(df_ops[df_ops["operation_type"] != "MarketplaceRedistributionOfAcquiringOperation"].head(5))
+            st.write("FIRST acquiring rows:")
+            st.write(df_ops[df_ops["operation_type"] == "MarketplaceRedistributionOfAcquiringOperation"].head(5))
+        else:
+            st.write(df_ops.head(5))
+
 
     df_ops_prev = pd.DataFrame(columns=df_ops.columns)
     if prev_from <= prev_to:
@@ -2494,6 +2512,7 @@ with tab1:
         if ops_prev_err_title:
             _block_with_retry(ops_prev_err_title, ops_prev_err_details, cache_clear_fn=load_ops_range.clear)
         df_ops_prev = ops_to_df(ops_prev)
+        df_ops_prev = allocate_acquiring_amount_by_posting(df_ops_prev)
         df_ops_prev = redistribute_ops_without_items(df_ops_prev)  # ✅ ДОБАВИТЬ
 
     sold = build_sold_sku_table(df_ops, cogs_df)
