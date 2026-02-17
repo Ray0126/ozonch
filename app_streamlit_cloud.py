@@ -2648,23 +2648,23 @@ with tab1:
                     st.dataframe(gdebug.sort_values("accruals_for_sale", ascending=False))
     sold_prev = build_sold_sku_table(df_ops_prev, cogs_df)
     sold_prev, _ = _apply_lk_logistics_to_sold_table(sold_prev, prev_from, prev_to)
-        if not df_ops_prev.empty else pd.DataFrame()
-
-    k = calc_kpi(df_ops, sold)
-    k_prev = calc_kpi(df_ops_prev, sold_prev)
-
-    ads_now_raw = load_ads_summary(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
-    ads_prev_raw = load_ads_summary(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
-
-    # Распределение рекламных расходов по артикулам (точнее, чем пропорция выручке)
-    ads_alloc_now = load_ads_spend_by_article(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
-    ads_alloc_prev = load_ads_spend_by_article(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
-
-    # Берём расход из распределения (total включает __OTHER_ADS__ и совпадает с "как в кабинете")
-    ads_now = {**ads_now_raw}
-    ads_prev = {**ads_prev_raw}
-    ads_now["spent"] = float(ads_alloc_now.get("total", 0.0) or 0.0)
-    ads_prev["spent"] = float(ads_alloc_prev.get("total", 0.0) or 0.0)
+    
+    if not df_ops_prev.empty else pd.DataFrame()
+        k = calc_kpi(df_ops, sold)
+        k_prev = calc_kpi(df_ops_prev, sold_prev)
+    
+        ads_now_raw = load_ads_summary(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+        ads_prev_raw = load_ads_summary(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+    
+        # Распределение рекламных расходов по артикулам (точнее, чем пропорция выручке)
+        ads_alloc_now = load_ads_spend_by_article(d_from.strftime("%Y-%m-%d"), d_to.strftime("%Y-%m-%d"))
+        ads_alloc_prev = load_ads_spend_by_article(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
+    
+        # Берём расход из распределения (total включает __OTHER_ADS__ и совпадает с "как в кабинете")
+        ads_now = {**ads_now_raw}
+        ads_prev = {**ads_prev_raw}
+        ads_now["spent"] = float(ads_alloc_now.get("total", 0.0) or 0.0)
+        ads_prev["spent"] = float(ads_alloc_prev.get("total", 0.0) or 0.0)
 
     # ---- ROAS ----
     def calc_roas(ads: dict) -> float:
