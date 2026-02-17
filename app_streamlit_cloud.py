@@ -6,6 +6,64 @@ import requests
 import streamlit as st
 import pandas as pd
 
+# ================== LK-ЛОГИСТИКА КАК В lk_report_by_offer_cli ==================
+LK_SERVICE_COLS = [
+    "Сборка заказа",
+    "Обработка отправления (Drop-off/Pick-up)",
+    "Магистраль",
+    "Последняя миля",
+    "Обратная магистраль",
+    "Обработка возврата",
+    "Обработка отмененного или невостребованного товара",
+    "Обработка невыкупленного товара",
+    "Логистика",
+    "Обратная логистика",
+]
+
+def _find_lk_report_xlsx(data_dir: str, date_from: str, date_to: str) -> str | None:
+    """Ищем выгрузку ЛК 'Отчет по товарам за период ...xlsx' в DATA_DIR по датам в имени файла."""
+    try:
+        p = Path(data_dir)
+        if not p.exists():
+            return None
+        candidates = list(p.glob("*.xlsx")) + list(p.glob("*.xls"))
+        # фильтруем по наличию дат в имени (как у выгрузки ЛК)
+        def score(fp: Path) -> int:
+            name = fp.name
+            s = 0
+            if date_from in name: s += 2
+            if date_to in name: s += 2
+            if "Отчет по товарам" in name or "Отчёт по товарам" in name or "Отчет по товарам за период" in name:
+                s += 1
+            return s
+        ranked = sorted(candidates, key=score, reverse=True)
+        if ranked and score(ranked[0]) >= 4:
+            return str(ranked[0])
+        return None
+    except Exception:
+        return None
+
+def _lk_services_by_offer_from_xlsx(xlsx_path: str) -> tuple[pd.Series, pd.DataFrame]:
+    """Повторяем логику lk_report_by_offer_cli: агрегируем по 'Артикул' на листе 'Начисления'."""
+    df = pd.read_excel(xlsx_path, sheet_name="Начисления")
+    # нормализуем названия колонок
+    df.columns = [str(c).strip() for c in df.columns]
+    if "Артикул" not in df.columns:
+        raise ValueError("В листе 'Начисления' нет колонки 'Артикул'")
+    # приводим числовые колонки
+    for col in LK_SERVICE_COLS:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0.0)
+        else:
+            df[col] = 0.0
+
+    df["Артикул"] = df["Артикул"].fillna("").astype(str).str.strip()
+    df_items = df[df["Артикул"] != ""].copy()
+
+    df_items["lk_logistics_services"] = df_items[LK_SERVICE_COLS].sum(axis=1)
+    by_offer = df_items.groupby("Артикул")["lk_logistics_services"].sum()
+    return by_offer, df_items[["Артикул"] + LK_SERVICE_COLS + ["lk_logistics_services"]]
+
 # ================== PERFORMANCE PRODUCTS REPORT (Spend Click by SKU) ==================
 def _rfc3339_day(s: str, end: bool = False) -> str:
     s = str(s or "").strip()
@@ -1603,7 +1661,6 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "bonus_points": bonus_sum,
                 "partner_programs": partner_sum,
                 "amount": amount_total,
-                "services_raw": services,
             })
             continue
 
@@ -1628,7 +1685,6 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "bonus_points": bonus_sum * w,
                 "partner_programs": partner_sum * w,
                 "amount": amount_total * w,
-                "services_raw": services,
             })
 
     df = pd.DataFrame(rows)
@@ -2104,37 +2160,7 @@ def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd
 
 
 # ================== SOLD SKU TABLE ==================
-
-
-LK_SERVICE_NAMES = [
-    "Сборка заказа",
-    "Обработка отправления (Drop-off/Pick-up)",
-    "Магистраль",
-    "Последняя миля",
-    "Обратная магистраль",
-    "Обработка возврата",
-    "Обработка отмененного или невостребованного товара",
-    "Обработка невыкупленного товара",
-    "Логистика",
-    "Обратная логистика",
-]
-
-def _norm_srv_name(s: str) -> str:
-    s = (s or "").strip()
-    return s.split(" (")[0].strip()
-
-def lk_services_cost_from_services_raw(services_raw) -> float:
-    if not services_raw:
-        return 0.0
-    total = 0.0
-    for sv in services_raw:
-        nm = _norm_srv_name(str(sv.get("name", "")))
-        if nm in LK_SERVICE_NAMES:
-            total += float(sv.get("price", 0.0) or 0.0)
-    return abs(total)
-
-
-def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
+def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame, lk_services_by_offer: 'pd.Series|None' = None) -> pd.DataFrame:
     # Эквайринг: распределяем acquiring_amount по SKU на уровне posting_number (до фильтрации sku)
     df_ops = allocate_acquiring_amount_by_posting(df_ops)
 
@@ -2147,18 +2173,10 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     sku_df["sku"] = sku_df["sku"].astype(int)
 
     # расходы (в API обычно минусом)
-    # Комиссия OZON: считаем НЕТТО (без clip), чтобы корректировки/сторно не терялись
-    sku_df["commission_cost"] = -pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
-
-    
-    # Услуги/логистика (LK-логика из services[])
-    sku_df["services_cost"] = sku_df.get("services_raw", []).apply(lk_services_cost_from_services_raw)
-
+    sku_df["commission_cost"] = (-sku_df["sale_commission"]).clip(lower=0.0)
+    sku_df["services_cost"] = (-sku_df["services_sum"]).clip(lower=0.0)
     # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
-    if "acquiring_amount_alloc" in sku_df.columns:
-        sku_df["acquiring_amount"] = pd.to_numeric(sku_df["acquiring_amount_alloc"], errors="coerce").fillna(0.0)
-    else:
-        sku_df["acquiring_amount"] = 0.0
+    sku_df["acquiring_amount"] = pd.to_numeric(sku_df.get("acquiring_amount_alloc", 0), errors="coerce").fillna(0.0)
 
     # “Баллы за скидки” и “Программы партнёров” (в ЛК идут ПЛЮСОМ к выручке)
     sku_df["bonus_amt"] = pd.to_numeric(sku_df.get("bonus_points", 0), errors="coerce").fillna(0.0)
@@ -2242,6 +2260,15 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
         c2 = c2[["sku", "article", "cogs"]].drop_duplicates(subset=["sku"], keep="last")
         g = g.merge(c2.rename(columns={"cogs": "cogs_unit"}), how="left", on="sku")
         g["article"] = g["article"].fillna("").astype(str)
+
+    # ЛК-логистика/услуги: подмена единой колонки logistics по Артикулу (как в lk_report_by_offer_cli),
+    # если передан маппинг lk_services_by_offer. Эквайринг/комиссию не трогаем.
+    try:
+        if lk_services_by_offer is not None and not lk_services_by_offer.empty:
+            g["logistics"] = g["article"].map(lk_services_by_offer).fillna(g["logistics"])
+    except Exception:
+        pass
+
         g["cogs_unit"] = pd.to_numeric(g["cogs_unit"], errors="coerce").fillna(0.0)
 
     # автозаполнение артикулов по названию (оставляем как было)
@@ -2500,12 +2527,13 @@ with tab1:
         _block_with_retry(ops_err_title, ops_err_details, cache_clear_fn=load_ops_range.clear)
 
 
+    # ================== DEBUG: разбор логистики по одному артикулу (Polyarnaya-210) ==================
     # ================== DEBUG: РАЗБОР УСЛУГ (services) ИЗ СЫРЫХ ОПЕРАЦИЙ ==================
     df_ops = ops_to_df(ops_now)
     # Эквайринг: распределяем по SKU на полном df_ops (по posting_number)
     df_ops = allocate_acquiring_cost_by_posting(df_ops)
     df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
-    st.write(df_ops.head(1))
+
     df_ops_prev = pd.DataFrame(columns=df_ops.columns)
     if prev_from <= prev_to:
         ops_prev, ops_prev_err_title, ops_prev_err_details = load_ops_range(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
@@ -2514,7 +2542,33 @@ with tab1:
         df_ops_prev = ops_to_df(ops_prev)
         df_ops_prev = redistribute_ops_without_items(df_ops_prev)  # ✅ ДОБАВИТЬ
 
-    sold = build_sold_sku_table(df_ops, cogs_df)
+    # --- ЛК логистика/услуги (как в lk_report_by_offer_cli): считаем один раз на период таба
+    lk_services_by_offer = None
+    lk_debug_df = None
+    try:
+        # date range по операциям таба (df_ops уже отфильтрован по периоду)
+        if "operation_date" in df_ops.columns and not df_ops["operation_date"].isna().all():
+            _dmin = pd.to_datetime(df_ops["operation_date"], errors="coerce").min()
+            _dmax = pd.to_datetime(df_ops["operation_date"], errors="coerce").max()
+            date_from_str = _dmin.strftime("%Y-%m-%d") if pd.notna(_dmin) else ""
+            date_to_str = _dmax.strftime("%Y-%m-%d") if pd.notna(_dmax) else ""
+        else:
+            date_from_str, date_to_str = "", ""
+        xlsx_path = _find_lk_report_xlsx(DATA_DIR, date_from_str, date_to_str) if date_from_str and date_to_str else None
+        if xlsx_path:
+            lk_services_by_offer, lk_debug_df = _lk_services_by_offer_from_xlsx(xlsx_path)
+            with st.expander("ЛК логистика/услуги (расчёт как lk_report_by_offer_cli)", expanded=False):
+                st.caption(f"Источник: {os.path.basename(xlsx_path)} | Период: {date_from_str} — {date_to_str}")
+                st.dataframe(lk_debug_df.head(50), use_container_width=True)
+        else:
+            # если отчёт не найден — не ломаем расчёт, остаётся старая логистика
+            pass
+    except Exception as _e:
+        # не валим таб, просто показываем сообщение в раскрывашке
+        with st.expander("ЛК логистика/услуги (ошибка расчёта)", expanded=False):
+            st.write(str(_e))
+
+    sold = build_sold_sku_table(df_ops, cogs_df, lk_services_by_offer)
 
     # --- DEBUG: разрез операций по одному SKU (помогает найти расхождения с ЛК)
     debug_sku = st.sidebar.text_input(
