@@ -2648,7 +2648,7 @@ with tab1:
                     st.dataframe(gdebug.sort_values("accruals_for_sale", ascending=False))
     sold_prev = build_sold_sku_table(df_ops_prev, cogs_df)
     sold_prev, _ = _apply_lk_logistics_to_sold_table(sold_prev, prev_from, prev_to)
- if not df_ops_prev.empty else pd.DataFrame()
+    if not df_ops_prev.empty else pd.DataFrame()
 
     k = calc_kpi(df_ops, sold)
     k_prev = calc_kpi(df_ops_prev, sold_prev)
