@@ -2500,13 +2500,12 @@ with tab1:
         _block_with_retry(ops_err_title, ops_err_details, cache_clear_fn=load_ops_range.clear)
 
 
-    # ================== DEBUG: разбор логистики по одному артикулу (Polyarnaya-210) ==================
     # ================== DEBUG: РАЗБОР УСЛУГ (services) ИЗ СЫРЫХ ОПЕРАЦИЙ ==================
     df_ops = ops_to_df(ops_now)
     # Эквайринг: распределяем по SKU на полном df_ops (по posting_number)
     df_ops = allocate_acquiring_cost_by_posting(df_ops)
     df_ops = redistribute_ops_without_items(df_ops)  # ✅ ДОБАВИТЬ
-
+    st.write(df_ops.head(1))
     df_ops_prev = pd.DataFrame(columns=df_ops.columns)
     if prev_from <= prev_to:
         ops_prev, ops_prev_err_title, ops_prev_err_details = load_ops_range(prev_from.strftime("%Y-%m-%d"), prev_to.strftime("%Y-%m-%d"))
