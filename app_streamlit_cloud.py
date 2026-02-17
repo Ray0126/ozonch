@@ -1603,6 +1603,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "bonus_points": bonus_sum,
                 "partner_programs": partner_sum,
                 "amount": amount_total,
+                "services_raw": services,
             })
             continue
 
@@ -1627,6 +1628,7 @@ def ops_to_df(ops: list[dict]) -> pd.DataFrame:
                 "bonus_points": bonus_sum * w,
                 "partner_programs": partner_sum * w,
                 "amount": amount_total * w,
+                "services_raw": services,
             })
 
     df = pd.DataFrame(rows)
@@ -2102,6 +2104,36 @@ def allocate_ads_by_article(sku_table: pd.DataFrame, ads_by_article: dict) -> pd
 
 
 # ================== SOLD SKU TABLE ==================
+
+
+LK_SERVICE_NAMES = [
+    "Сборка заказа",
+    "Обработка отправления (Drop-off/Pick-up)",
+    "Магистраль",
+    "Последняя миля",
+    "Обратная магистраль",
+    "Обработка возврата",
+    "Обработка отмененного или невостребованного товара",
+    "Обработка невыкупленного товара",
+    "Логистика",
+    "Обратная логистика",
+]
+
+def _norm_srv_name(s: str) -> str:
+    s = (s or "").strip()
+    return s.split(" (")[0].strip()
+
+def lk_services_cost_from_services_raw(services_raw) -> float:
+    if not services_raw:
+        return 0.0
+    total = 0.0
+    for sv in services_raw:
+        nm = _norm_srv_name(str(sv.get("name", "")))
+        if nm in LK_SERVICE_NAMES:
+            total += float(sv.get("price", 0.0) or 0.0)
+    return abs(total)
+
+
 def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> pd.DataFrame:
     # Эквайринг: распределяем acquiring_amount по SKU на уровне posting_number (до фильтрации sku)
     df_ops = allocate_acquiring_amount_by_posting(df_ops)
@@ -2118,22 +2150,9 @@ def build_sold_sku_table(df_ops: pd.DataFrame, cogs_df_local: pd.DataFrame) -> p
     # Комиссия OZON: считаем НЕТТО (без clip), чтобы корректировки/сторно не терялись
     sku_df["commission_cost"] = -pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
 
-    # Услуги/логистика: заменяем старую "services_sum" на единую НЕТТО-логику в сторону ЛК
-    # База: services_sum (обычно уже содержит часть услуг в строках продаж/возвратов)
-    base_services = -pd.to_numeric(sku_df.get("services_sum", 0), errors="coerce").fillna(0.0)
-
-    # Плюс: отдельные сервисные операции (по type_name), которые в ЛК отражаются как логистика/услуги
-    LK_SERVICE_NAMES = {'Сборка заказа', 'Обработка отправления (Drop-off/Pick-up)', 'Магистраль', 'Последняя миля', 'Обратная магистраль', 'Обработка возврата', 'Обработка отмененного или невостребованного товара', 'Обработка невыкупленного товара', 'Логистика', 'Обратная логистика'}
-    type_name = sku_df.get("type_name", "").astype(str).str.strip()
-    is_lk_service = type_name.isin(LK_SERVICE_NAMES)
-
-    # Чтобы не задвоить продажи: добавляем amount только у "чистых" сервисных строк (без выручки/комиссии)
-    accr = pd.to_numeric(sku_df.get("accruals_for_sale", 0), errors="coerce").fillna(0.0)
-    comm = pd.to_numeric(sku_df.get("sale_commission", 0), errors="coerce").fillna(0.0)
-    pure_service = is_lk_service & (accr.abs() < 1e-9) & (comm.abs() < 1e-9)
-
-    extra_services = -pd.to_numeric(sku_df.get("amount", 0), errors="coerce").fillna(0.0)
-    sku_df["services_cost"] = base_services + extra_services.where(pure_service, 0.0)
+    
+    # Услуги/логистика (LK-логика из services[])
+    sku_df["services_cost"] = sku_df.get("services_raw", []).apply(lk_services_cost_from_services_raw)
 
     # Эквайринг: храним распределенный amount (со знаком). Расход посчитаем НЕТТО на уровне SKU.
     if "acquiring_amount_alloc" in sku_df.columns:
